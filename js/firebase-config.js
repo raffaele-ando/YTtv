@@ -25,12 +25,12 @@
 // tutto viene salvato in locale sul dispositivo.
 
 export const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: "",
+  apiKey: "AIzaSyDQ5fyY_nHSzi5jruHGzgEjacK54snyOy4",
+  authDomain: "gen-lang-client-0578386900.firebaseapp.com",
+  projectId: "gen-lang-client-0578386900",
+  storageBucket: "gen-lang-client-0578386900.firebasestorage.app",
+  messagingSenderId: "646615244971",
+  appId: "1:646615244971:web:7d9ea1288772867e3ed7ee"
 };
 
 export const isFirebaseConfigured = () =>
