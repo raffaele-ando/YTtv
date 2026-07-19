@@ -157,6 +157,7 @@ export async function fetchChannelVideosAPI(channel, max = 25) {
       id: v.id,
       ch: channel.id,
       title: v.snippet?.title || '',
+      desc: (v.snippet?.description || '').slice(0, 600),
       pub: v.snippet?.publishedAt || '',
       dur,
       views: v.statistics?.viewCount ?? null,
@@ -199,10 +200,12 @@ export async function fetchChannelVideosRSS(channelId) {
     const title = entry.getElementsByTagName('title')[0]?.textContent || '';
     const pub = entry.getElementsByTagName('published')[0]?.textContent || '';
     const stats = entry.getElementsByTagNameNS(MEDIA_NS, 'statistics')[0];
+    const desc = entry.getElementsByTagNameNS(MEDIA_NS, 'description')[0]?.textContent || '';
     return {
       id: vid,
       ch: channelId,
       title,
+      desc: desc.slice(0, 600),
       pub,
       dur: 0, // il feed RSS non espone la durata
       views: stats?.getAttribute('views') ?? null,
@@ -244,6 +247,46 @@ export async function refineShortsDetection(videos, onUpdate) {
     }));
     onUpdate?.();
   }
+}
+
+// ---------- playlist di un canale ----------
+
+// Elenco delle playlist pubbliche del canale (comprese le serie/podcast).
+export async function getChannelPlaylists(channelId) {
+  const out = [];
+  let pageToken;
+  do {
+    const data = await yt('playlists', {
+      part: 'snippet,contentDetails', channelId, maxResults: 50, pageToken,
+    });
+    for (const p of data.items || []) {
+      out.push({
+        id: p.id,
+        title: p.snippet?.title || 'Playlist',
+        count: p.contentDetails?.itemCount ?? 0,
+      });
+    }
+    pageToken = data.nextPageToken;
+  } while (pageToken && out.length < 100);
+  return out;
+}
+
+// ID dei video contenuti in una playlist (fino a maxPages*50 elementi).
+export async function getPlaylistVideoIds(playlistId, maxPages = 3) {
+  const ids = [];
+  let pageToken;
+  for (let i = 0; i < maxPages; i++) {
+    const data = await yt('playlistItems', {
+      part: 'contentDetails', playlistId, maxResults: 50, pageToken,
+    });
+    for (const it of data.items || []) {
+      const id = it.contentDetails?.videoId;
+      if (id) ids.push(id);
+    }
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return ids;
 }
 
 // ---------- ricerca globale su YouTube ----------

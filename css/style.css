@@ -743,6 +743,21 @@ input, select { font-family: inherit; }
 .switch input:checked + i { background: var(--ok); }
 .switch input:checked + i::after { transform: translateX(20px); }
 
+/* elenco playlist nell'editor filtri */
+.pl-list { display: flex; flex-direction: column; gap: 6px; max-height: 230px; overflow-y: auto; padding: 2px; }
+.pl-row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border-radius: 10px; background: rgba(0,0,0,0.25); border: 1px solid var(--stroke);
+  cursor: pointer; font-size: 13.5px; transition: background .15s, border-color .15s;
+  /* annulla lo stile delle label dei form (.field label) */
+  text-transform: none; letter-spacing: 0; color: var(--text); margin: 0; font-weight: 500;
+}
+.pl-row:hover { background: var(--surface-2); }
+.pl-row:has(input:checked) { border-color: rgba(229, 9, 20, 0.55); background: var(--accent-soft); }
+.pl-row input { accent-color: var(--accent); width: 16px; height: 16px; flex: none; margin: 0; }
+.pl-row b { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pl-row .cnt { margin-left: auto; color: var(--text-3); font-size: 12px; flex: none; }
+
 .badge-ok { color: var(--ok); font-weight: 800; font-size: 12.5px; }
 .badge-warn { color: var(--warn); font-weight: 800; font-size: 12.5px; }
 .badge-err { color: #ff6961; font-weight: 800; font-size: 12.5px; }

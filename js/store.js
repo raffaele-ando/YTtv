@@ -3,7 +3,7 @@
 // ============================================================
 
 import { MAX_CACHE_PER_CHANNEL } from './config.js';
-import { fetchChannelVideos, refineShortsDetection, setApiKey } from './api.js';
+import { fetchChannelVideos, refineShortsDetection, setApiKey, getPlaylistVideoIds } from './api.js';
 
 const LS_KEY = 'yttv:state:v2';
 
@@ -158,13 +158,24 @@ export const channelList = () =>
 
 export function channelFilterInfo(ch) {
   const f = ch?.filters;
-  if (!f || f.mode === 'all' || !Array.isArray(f.terms) || !f.terms.length) return null;
-  return f;
+  if (!f || f.mode === 'all') return null;
+  const hasTerms = Array.isArray(f.terms) && f.terms.length;
+  const hasPls = Array.isArray(f.playlists) && f.playlists.length;
+  return hasTerms || hasPls ? f : null;
 }
 
-function titleMatches(title, terms) {
-  const t = (title || '').toLowerCase();
+function titleMatches(text, terms) {
+  const t = (text || '').toLowerCase();
   return terms.some((k) => k && t.includes(k.toLowerCase()));
+}
+
+// Un video "corrisponde" al filtro se una parola compare nel titolo (e nella
+// descrizione, se richiesto) OPPURE se appartiene a una playlist selezionata.
+export function videoMatchesFilter(v, f, ch) {
+  const inPlaylist = Boolean(ch?.plVids?.[v.id]);
+  const text = f.inDesc ? `${v.title}\n${v.desc || ''}` : v.title;
+  const byTerms = f.terms?.length ? titleMatches(text, f.terms) : false;
+  return byTerms || inPlaylist;
 }
 
 export function isExcluded(v) {
@@ -173,19 +184,49 @@ export function isExcluded(v) {
   if (ch.noShorts && v.isShort) return true;
   const f = channelFilterInfo(ch);
   if (!f) return false;
-  const m = titleMatches(v.title, f.terms);
+  const m = videoMatchesFilter(v, f, ch);
   return f.mode === 'include' ? !m : m;
 }
 
-export function setChannelFilter(id, { mode = 'all', terms = [], noShorts = false } = {}) {
+export function setChannelFilter(id, {
+  mode = 'all', terms = [], inDesc = false, noShorts = false, playlists = [], plVids = null,
+} = {}) {
   const ch = state.channels[id];
   if (!ch) return;
   const clean = terms.map((t) => t.trim()).filter(Boolean);
-  ch.filters = mode === 'all' || !clean.length ? null : { mode, terms: clean };
+  const pls = (playlists || []).filter((p) => p?.id).map((p) => ({ id: p.id, title: p.title || 'Playlist' }));
+  ch.filters = (mode === 'all' || (!clean.length && !pls.length))
+    ? null
+    : { mode, terms: clean, inDesc: Boolean(inDesc), playlists: pls };
   ch.noShorts = Boolean(noShorts);
+  if (plVids) ch.plVids = plVids;
+  if (!ch.filters?.playlists?.length) delete ch.plVids;
   ch.fUpd = Date.now();
   touch();
   emit();
+}
+
+// Aggiorna la mappa "video → appartiene a una playlist selezionata".
+// Richiede l'API; se non è disponibile si tiene la mappa precedente e si
+// riprova al prossimo aggiornamento. La mappa è locale (non va nel cloud):
+// ogni dispositivo la ricostruisce da sé partendo dalle playlist scelte.
+async function updatePlaylistMembership(channel) {
+  const ch = state.channels[channel.id];
+  const pls = ch?.filters?.playlists;
+  if (!pls?.length) return;
+  const cachedIds = new Set(videosOf(channel.id, { includeExcluded: true }).map((v) => v.id));
+  const member = {};
+  let ok = 0;
+  for (const pl of pls) {
+    try {
+      const ids = await getPlaylistVideoIds(pl.id);
+      for (const id of ids) if (cachedIds.has(id)) member[id] = 1;
+      ok++;
+    } catch { /* quota/offline: si riprova più tardi */ }
+  }
+  if (!ok) return;
+  // se qualche playlist non è stata letta, non perdere le appartenenze note
+  ch.plVids = ok === pls.length ? member : { ...(ch.plVids || {}), ...member };
 }
 
 // ---------- video ----------
@@ -297,6 +338,9 @@ export async function refreshChannel(channel) {
 
   const ch = state.channels[channel.id];
   if (ch) { ch.lastFetch = Date.now(); ch.lastSource = source; }
+
+  // aggiorna l'appartenenza alle playlist filtrate (vale anche per i video nuovi)
+  await updatePlaylistMembership(channel);
 
   // affina il riconoscimento shorts in background
   const mine = videosOf(channel.id).filter((v) => state.videos[v.id]?.ambiguous);

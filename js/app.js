@@ -16,7 +16,7 @@ import {
   updateSettings, exportJSON, importJSON, resetAll,
   channelFilterInfo, isExcluded, setChannelFilter,
 } from './store.js';
-import { resolveChannelInput, searchChannels } from './api.js';
+import { resolveChannelInput, searchChannels, getChannelPlaylists, getPlaylistVideoIds } from './api.js';
 import { openPlayer, openShortsPlayer, shortThumbHTML } from './player.js';
 import { cloud, initCloud, signIn, signOutUser, onAuthChange } from './cloud.js';
 import { isFirebaseConfigured } from './firebase-config.js';
@@ -587,14 +587,26 @@ async function channelCardHandler(e) {
 
 function openFilterEditor(ch, onSaved) {
   const all = videosOf(ch.id, { includeExcluded: true });
-  const f = ch.filters || { mode: 'all', terms: [] };
+  const f = ch.filters || { mode: 'all', terms: [], inDesc: false, playlists: [] };
   const root = $('#modal-root');
+
+  // selezione playlist e appartenenze caricate in questa sessione dell'editor
+  const plSel = new Map((f.playlists || []).map((p) => [p.id, p.title]));
+  const plSets = new Map();   // playlistId -> Set(videoId)
+  const plPending = new Set();
+
+  const plRowHTML = (p, checked) => `
+    <label class="pl-row">
+      <input type="checkbox" data-pl="${esc(p.id)}" data-title="${esc(p.title)}" ${checked ? 'checked' : ''}>
+      <b>${esc(p.title)}</b>
+      ${p.count != null ? `<span class="cnt">${p.count} video</span>` : ''}
+    </label>`;
 
   root.innerHTML = `
   <div class="modal-overlay" id="flt-overlay">
-    <div class="modal-card" style="width:min(540px,100%)">
+    <div class="modal-card" style="width:min(560px,100%);max-height:92dvh;overflow-y:auto">
       <h3>${icon('filter', 19)} Filtri per ${esc(ch.title)}</h3>
-      <p>Scegli cosa vedere di questo canale. I contenuti esclusi spariscono da Home, Video, Shorts e contatori — automaticamente, anche per i video futuri.</p>
+      <p>Scegli cosa vedere di questo canale. Un contenuto "corrisponde" se una parola compare nel titolo (o nella descrizione) <b>oppure</b> se fa parte di una playlist selezionata. Tutto si applica da solo anche ai video futuri.</p>
       <div class="field">
         <label for="flt-mode">Modalità</label>
         <select id="flt-mode">
@@ -603,10 +615,24 @@ function openFilterEditor(ch, onSaved) {
           <option value="exclude" ${f.mode === 'exclude' ? 'selected' : ''}>NASCONDI i contenuti che corrispondono</option>
         </select>
       </div>
-      <div class="field" id="flt-terms-field" ${!channelFilterInfo(ch) ? 'style="opacity:.45"' : ''}>
-        <label for="flt-terms">Parole nel titolo (separate da virgola)</label>
-        <input type="text" id="flt-terms" value="${esc((f.terms || []).join(', '))}" placeholder="es. Podcast, Ep., Ci pensiamo lunedì">
-        <div class="note">Confronto sul titolo, maiuscole/minuscole indifferenti. Basta che una parola corrisponda.</div>
+      <div id="flt-rules">
+        <div class="field">
+          <label for="flt-terms">Parole nel titolo (separate da virgola)</label>
+          <input type="text" id="flt-terms" value="${esc((f.terms || []).join(', '))}" placeholder="es. Podcast, Ep., Ci pensiamo lunedì">
+          <div class="note">Maiuscole/minuscole indifferenti. Basta che una parola corrisponda.</div>
+        </div>
+        <div class="switch-row" style="border-top:0;padding-top:0">
+          <div class="sw-label"><b>Cerca anche nella descrizione</b><span>Le parole vengono cercate pure nella descrizione del video</span></div>
+          <label class="switch"><input type="checkbox" id="flt-indesc" ${f.inDesc ? 'checked' : ''}><i></i></label>
+        </div>
+        <div class="field" style="margin-top:10px">
+          <label>Playlist e podcast del canale</label>
+          <div class="pl-list" id="flt-pls">
+            ${[...plSel].map(([id, title]) => plRowHTML({ id, title, count: null }, true)).join('')}
+            <button class="btn btn-ghost btn-sm" id="flt-load-pls" type="button">${icon('down', 16)} Carica le playlist del canale</button>
+          </div>
+          <div class="note">I video che fanno parte delle playlist selezionate contano come "corrispondenti", anche quelli futuri.</div>
+        </div>
       </div>
       <div class="switch-row">
         <div class="sw-label"><b>Nascondi tutti gli Shorts del canale</b><span>Utile se di questo canale vuoi solo i video lunghi</span></div>
@@ -622,40 +648,113 @@ function openFilterEditor(ch, onSaved) {
 
   const modeEl = $('#flt-mode');
   const termsEl = $('#flt-terms');
+  const inDescEl = $('#flt-indesc');
   const noShortsEl = $('#flt-noshorts');
+  const plsBox = $('#flt-pls');
 
   const readForm = () => ({
     mode: modeEl.value,
     terms: termsEl.value.split(',').map((t) => t.trim()).filter(Boolean),
+    inDesc: inDescEl.checked,
     noShorts: noShortsEl.checked,
+    playlists: [...plSel].map(([id, title]) => ({ id, title })),
   });
 
+  const inSelectedPlaylists = (videoId) => {
+    for (const [plId] of plSel) {
+      if (plSets.get(plId)?.has(videoId)) return true;
+      if (!plSets.has(plId) && ch.plVids?.[videoId]) return true; // fallback: mappa già nota
+    }
+    return false;
+  };
+
   const preview = () => {
-    const { mode, terms, noShorts } = readForm();
-    $('#flt-terms-field').style.opacity = mode === 'all' ? '.45' : '1';
+    const { mode, terms, inDesc, noShorts } = readForm();
+    $('#flt-rules').style.opacity = mode === 'all' ? '.45' : '1';
     const lower = terms.map((t) => t.toLowerCase());
     const visible = all.filter((v) => {
       if (noShorts && v.isShort) return false;
-      if (mode === 'all' || !lower.length) return true;
-      const m = lower.some((k) => v.title.toLowerCase().includes(k));
+      if (mode === 'all' || (!lower.length && !plSel.size)) return true;
+      const text = (inDesc ? `${v.title}\n${v.desc || ''}` : v.title).toLowerCase();
+      const m = lower.some((k) => text.includes(k)) || inSelectedPlaylists(v.id);
       return mode === 'include' ? m : !m;
     });
     const hidden = all.length - visible.length;
-    $('#flt-preview').innerHTML = hidden
+    const loading = plPending.size ? ' · <span style="color:var(--warn)">lettura playlist in corso…</span>' : '';
+    $('#flt-preview').innerHTML = (hidden
       ? `Anteprima sugli ultimi ${all.length} contenuti in cache: <b style="color:var(--text)">${visible.length} visibili</b> · <b style="color:#ff6961">${hidden} nascosti</b>`
-      : `Anteprima: tutti i ${all.length} contenuti in cache resterebbero visibili.`;
+      : `Anteprima: tutti i ${all.length} contenuti in cache resterebbero visibili.`) + loading;
   };
-  preview();
 
+  const fetchPlaylistSet = async (plId) => {
+    if (plSets.has(plId) || plPending.has(plId)) return;
+    plPending.add(plId);
+    preview();
+    try {
+      plSets.set(plId, new Set(await getPlaylistVideoIds(plId)));
+    } catch {
+      toast('Non riesco a leggere la playlist ora: l’appartenenza verrà completata al prossimo aggiornamento', 'err');
+    } finally {
+      plPending.delete(plId);
+      preview();
+    }
+  };
+
+  // per le playlist già selezionate in passato, aggiorna subito l'anteprima
+  for (const [plId] of plSel) fetchPlaylistSet(plId);
+
+  $('#flt-load-pls').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.innerHTML = `${icon('refresh', 16)} Carico…`;
+    try {
+      const pls = await getChannelPlaylists(ch.id);
+      if (!pls.length) {
+        plsBox.innerHTML = `<p class="hint" style="margin:4px">Questo canale non ha playlist pubbliche.</p>`;
+        return;
+      }
+      plsBox.innerHTML = pls.map((p) => plRowHTML(p, plSel.has(p.id))).join('');
+    } catch (err) {
+      btn.disabled = false;
+      btn.innerHTML = `${icon('down', 16)} Riprova a caricare le playlist`;
+      toast(`Playlist non disponibili: ${err.message}`, 'err');
+    }
+  });
+
+  plsBox.addEventListener('change', (e) => {
+    const cb = e.target.closest('input[data-pl]');
+    if (!cb) return;
+    if (cb.checked) {
+      plSel.set(cb.dataset.pl, cb.dataset.title);
+      fetchPlaylistSet(cb.dataset.pl);
+    } else {
+      plSel.delete(cb.dataset.pl);
+    }
+    preview();
+  });
+
+  preview();
   modeEl.addEventListener('change', preview);
   termsEl.addEventListener('input', preview);
+  inDescEl.addEventListener('change', preview);
   noShortsEl.addEventListener('change', preview);
 
   const close = () => { root.innerHTML = ''; };
   $('#flt-overlay').addEventListener('click', (e) => { if (e.target.id === 'flt-overlay') close(); });
   $('#flt-cancel').addEventListener('click', close);
   $('#flt-save').addEventListener('click', () => {
-    setChannelFilter(ch.id, readForm());
+    const form = readForm();
+    // mappa video→playlist per i video in cache, con ciò che è stato letto ora
+    let plVids = null;
+    if (form.playlists.length) {
+      plVids = { ...(ch.plVids || {}) };
+      const cached = new Set(all.map((v) => v.id));
+      for (const [plId] of plSel) {
+        const set = plSets.get(plId);
+        if (set) for (const vid of set) if (cached.has(vid)) plVids[vid] = 1;
+      }
+    }
+    setChannelFilter(ch.id, { ...form, plVids });
     close();
     toast('Filtri salvati: si applicano da soli anche ai prossimi video');
     onSaved?.();
