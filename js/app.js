@@ -14,6 +14,7 @@ import {
   isWatched, isWatchLater, progressOf, markWatched, toggleWatchLater,
   refreshAll, refreshChannel, refreshStatus, searchLocal, stats,
   updateSettings, exportJSON, importJSON, resetAll,
+  channelFilterInfo, isExcluded, setChannelFilter,
 } from './store.js';
 import { resolveChannelInput, searchChannels } from './api.js';
 import { openPlayer, openShortsPlayer, shortThumbHTML } from './player.js';
@@ -468,6 +469,8 @@ function renderChannels() {
           const vids = videosOf(c.id);
           const unseen = vids.filter((v) => !isWatched(v.id)).length;
           const shorts = vids.filter((v) => v.isShort).length;
+          const hiddenCount = videosOf(c.id, { includeExcluded: true }).length - vids.length;
+          const filterOn = Boolean(channelFilterInfo(c) || c.noShorts);
           return `
           <div class="chcard" data-chid="${c.id}">
             <div class="chcard-top" data-open>
@@ -481,10 +484,12 @@ function renderChannels() {
               ${unseen ? `<span class="unseen">${unseen} da vedere</span>` : `<span>Tutto visto ✓</span>`}
               <span>${vids.length - shorts} video</span>
               <span>${shorts} shorts</span>
+              ${filterOn ? `<span style="color:var(--warn)" title="Questo canale ha filtri attivi${hiddenCount ? `: ${hiddenCount} contenuti nascosti` : ''}">${icon('filter', 11)} filtro${hiddenCount ? ` · ${hiddenCount} nascosti` : ''}</span>` : ''}
               ${c.lastSource === 'rss' ? `<span title="Ultimo aggiornamento via feed RSS">RSS</span>` : ''}
             </div>
             <div class="chcard-actions">
               <button class="btn btn-ghost btn-sm" data-open style="flex:1">${icon('play', 16)} Apri</button>
+              <button class="btn ${filterOn ? 'btn-accent' : 'btn-ghost'} btn-sm" data-filter title="Filtri: scegli quali contenuti vedere">${icon('filter', 16)}</button>
               <button class="btn btn-ghost btn-sm" data-refresh title="Aggiorna canale">${icon('refresh', 16)}</button>
               <button class="btn btn-danger btn-sm" data-remove title="Rimuovi canale">${icon('trash', 16)}</button>
             </div>
@@ -556,6 +561,10 @@ async function channelCardHandler(e) {
     if (ok) { removeChannel(id); toast(`Rimosso: ${ch.title}`); renderChannels(); }
     return;
   }
+  if (e.target.closest('[data-filter]')) {
+    openFilterEditor(ch, renderChannels);
+    return;
+  }
   if (e.target.closest('[data-refresh]')) {
     const btn = e.target.closest('[data-refresh]');
     btn.classList.add('spin');
@@ -572,6 +581,87 @@ async function channelCardHandler(e) {
   }
 }
 
+// ---------------- Filtri per canale ----------------
+// Es.: di un canale che pubblica più rubriche/podcast, tieni solo quella che
+// vuoi seguire. Le regole si applicano da sole anche ai video futuri.
+
+function openFilterEditor(ch, onSaved) {
+  const all = videosOf(ch.id, { includeExcluded: true });
+  const f = ch.filters || { mode: 'all', terms: [] };
+  const root = $('#modal-root');
+
+  root.innerHTML = `
+  <div class="modal-overlay" id="flt-overlay">
+    <div class="modal-card" style="width:min(540px,100%)">
+      <h3>${icon('filter', 19)} Filtri per ${esc(ch.title)}</h3>
+      <p>Scegli cosa vedere di questo canale. I contenuti esclusi spariscono da Home, Video, Shorts e contatori — automaticamente, anche per i video futuri.</p>
+      <div class="field">
+        <label for="flt-mode">Modalità</label>
+        <select id="flt-mode">
+          <option value="all" ${!channelFilterInfo(ch) ? 'selected' : ''}>Mostra tutto il canale</option>
+          <option value="include" ${f.mode === 'include' ? 'selected' : ''}>Mostra SOLO i contenuti che corrispondono</option>
+          <option value="exclude" ${f.mode === 'exclude' ? 'selected' : ''}>NASCONDI i contenuti che corrispondono</option>
+        </select>
+      </div>
+      <div class="field" id="flt-terms-field" ${!channelFilterInfo(ch) ? 'style="opacity:.45"' : ''}>
+        <label for="flt-terms">Parole nel titolo (separate da virgola)</label>
+        <input type="text" id="flt-terms" value="${esc((f.terms || []).join(', '))}" placeholder="es. Podcast, Ep., Ci pensiamo lunedì">
+        <div class="note">Confronto sul titolo, maiuscole/minuscole indifferenti. Basta che una parola corrisponda.</div>
+      </div>
+      <div class="switch-row">
+        <div class="sw-label"><b>Nascondi tutti gli Shorts del canale</b><span>Utile se di questo canale vuoi solo i video lunghi</span></div>
+        <label class="switch"><input type="checkbox" id="flt-noshorts" ${ch.noShorts ? 'checked' : ''}><i></i></label>
+      </div>
+      <p class="hint" id="flt-preview" style="margin:12px 0 16px"></p>
+      <div class="modal-actions">
+        <button class="btn btn-ghost btn-sm" id="flt-cancel">Annulla</button>
+        <button class="btn btn-primary btn-sm" id="flt-save">${icon('check', 16)} Salva filtri</button>
+      </div>
+    </div>
+  </div>`;
+
+  const modeEl = $('#flt-mode');
+  const termsEl = $('#flt-terms');
+  const noShortsEl = $('#flt-noshorts');
+
+  const readForm = () => ({
+    mode: modeEl.value,
+    terms: termsEl.value.split(',').map((t) => t.trim()).filter(Boolean),
+    noShorts: noShortsEl.checked,
+  });
+
+  const preview = () => {
+    const { mode, terms, noShorts } = readForm();
+    $('#flt-terms-field').style.opacity = mode === 'all' ? '.45' : '1';
+    const lower = terms.map((t) => t.toLowerCase());
+    const visible = all.filter((v) => {
+      if (noShorts && v.isShort) return false;
+      if (mode === 'all' || !lower.length) return true;
+      const m = lower.some((k) => v.title.toLowerCase().includes(k));
+      return mode === 'include' ? m : !m;
+    });
+    const hidden = all.length - visible.length;
+    $('#flt-preview').innerHTML = hidden
+      ? `Anteprima sugli ultimi ${all.length} contenuti in cache: <b style="color:var(--text)">${visible.length} visibili</b> · <b style="color:#ff6961">${hidden} nascosti</b>`
+      : `Anteprima: tutti i ${all.length} contenuti in cache resterebbero visibili.`;
+  };
+  preview();
+
+  modeEl.addEventListener('change', preview);
+  termsEl.addEventListener('input', preview);
+  noShortsEl.addEventListener('change', preview);
+
+  const close = () => { root.innerHTML = ''; };
+  $('#flt-overlay').addEventListener('click', (e) => { if (e.target.id === 'flt-overlay') close(); });
+  $('#flt-cancel').addEventListener('click', close);
+  $('#flt-save').addEventListener('click', () => {
+    setChannelFilter(ch.id, readForm());
+    close();
+    toast('Filtri salvati: si applicano da soli anche ai prossimi video');
+    onSaved?.();
+  });
+}
+
 // ---------------- Dettaglio canale ----------------
 
 let chDetailTab = 'videos';
@@ -579,10 +669,14 @@ let chDetailTab = 'videos';
 function renderChannelDetail(chId) {
   const ch = state.channels[chId];
   if (!ch) { location.hash = '#/channels'; return; }
+  const everything = videosOf(chId, { includeExcluded: true });
+  const hidden = everything.filter((v) => isExcluded(v));
   const vids = videosOf(chId).filter((v) => !v.isShort);
   const shorts = videosOf(chId).filter((v) => v.isShort);
   const unseen = [...vids, ...shorts].filter((v) => !isWatched(v.id)).length;
+  if (chDetailTab === 'hidden' && !hidden.length) chDetailTab = 'videos';
   const list = chDetailTab === 'videos' ? vids : shorts;
+  const filterOn = Boolean(channelFilterInfo(ch) || ch.noShorts);
 
   view.innerHTML = `
   <div class="page" style="padding-left:0;padding-right:0;padding-top:0">
@@ -600,6 +694,7 @@ function renderChannelDetail(chId) {
           </div>
         </div>
         <div class="actions">
+          <button class="btn ${filterOn ? 'btn-accent' : 'btn-ghost'} btn-sm" id="chd-filter">${icon('filter', 16)} Filtri${filterOn ? ' attivi' : ''}</button>
           <button class="btn btn-ghost btn-sm" id="chd-refresh">${icon('refresh', 16)} Aggiorna</button>
           <button class="btn btn-ghost btn-sm" id="chd-markall">${icon('check', 16)} Tutto visto</button>
         </div>
@@ -609,12 +704,20 @@ function renderChannelDetail(chId) {
       <div class="chips">
         <button class="chip ${chDetailTab === 'videos' ? 'active' : ''}" data-tab="videos">${icon('film', 15)} Video <span style="opacity:.6">${vids.length}</span></button>
         <button class="chip ${chDetailTab === 'shorts' ? 'active' : ''}" data-tab="shorts">${icon('bolt', 15)} Shorts <span style="opacity:.6">${shorts.length}</span></button>
+        ${hidden.length ? `<button class="chip ${chDetailTab === 'hidden' ? 'active' : ''}" data-tab="hidden">${icon('eyeoff', 15)} Nascosti dal filtro <span style="opacity:.6">${hidden.length}</span></button>` : ''}
       </div>
-      ${list.length
-        ? (chDetailTab === 'videos'
-            ? `<div class="vgrid">${list.map((v) => vcardHTML(v, { showChannel: false })).join('')}</div>`
-            : `<div class="sgrid" data-queue="${list.map((v) => v.id).join(',')}">${list.map((v) => scardHTML(v)).join('')}</div>`)
-        : emptyHTML(chDetailTab === 'videos' ? 'film' : 'bolt', 'Niente qui', `Questo canale non ha ${chDetailTab === 'videos' ? 'video' : 'shorts'} recenti in cache.`)}
+      ${chDetailTab === 'hidden'
+        ? `<p class="hint" style="margin-top:0">Questi contenuti sono esclusi dalle regole del filtro: non compaiono in Home, nei contatori né tra i "da vedere". Modifica i filtri per recuperarli.</p>
+           ${hidden.filter((v) => !v.isShort).length ? `<div class="vgrid" style="margin-bottom:26px">${hidden.filter((v) => !v.isShort).map((v) => vcardHTML(v, { showChannel: false })).join('')}</div>` : ''}
+           ${hidden.filter((v) => v.isShort).length ? `<div class="sgrid" data-queue="${hidden.filter((v) => v.isShort).map((v) => v.id).join(',')}">${hidden.filter((v) => v.isShort).map((v) => scardHTML(v)).join('')}</div>` : ''}`
+        : (list.length
+            ? (chDetailTab === 'videos'
+                ? `<div class="vgrid">${list.map((v) => vcardHTML(v, { showChannel: false })).join('')}</div>`
+                : `<div class="sgrid" data-queue="${list.map((v) => v.id).join(',')}">${list.map((v) => scardHTML(v)).join('')}</div>`)
+            : emptyHTML(chDetailTab === 'videos' ? 'film' : 'bolt', 'Niente qui',
+                filterOn && everything.length
+                  ? 'I filtri attivi nascondono tutti i contenuti di questa sezione. Controlla la scheda "Nascosti dal filtro".'
+                  : `Questo canale non ha ${chDetailTab === 'videos' ? 'video' : 'shorts'} recenti in cache.`))}
     </div>
   </div>`;
 
@@ -622,6 +725,7 @@ function renderChannelDetail(chId) {
     chDetailTab = c.dataset.tab;
     renderChannelDetail(chId);
   }));
+  $('#chd-filter').addEventListener('click', () => openFilterEditor(ch, () => renderChannelDetail(chId)));
   $('#chd-refresh').addEventListener('click', async (e) => {
     e.currentTarget.classList.add('spin');
     try {

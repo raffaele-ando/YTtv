@@ -74,6 +74,7 @@ export function userDataSnapshot() {
         id: c.id, title: c.title, handle: c.handle, thumb: c.thumb,
         banner: c.banner || '', uploads: c.uploads || '', subs: c.subs ?? null,
         addedAt: c.addedAt || 0,
+        filters: c.filters || null, noShorts: Boolean(c.noShorts), fUpd: c.fUpd || 0,
       }])
     ),
     watched: state.watched,
@@ -90,7 +91,17 @@ export function mergeRemoteData(remote) {
   let changed = false;
 
   for (const [id, ch] of Object.entries(remote.channels || {})) {
-    if (!state.channels[id]) { state.channels[id] = { ...ch }; changed = true; }
+    const local = state.channels[id];
+    if (!local) {
+      state.channels[id] = { ...ch };
+      changed = true;
+    } else if ((ch.fUpd || 0) > (local.fUpd || 0)) {
+      // i filtri del canale modificati su un altro dispositivo vincono se più recenti
+      local.filters = ch.filters || null;
+      local.noShorts = Boolean(ch.noShorts);
+      local.fUpd = ch.fUpd;
+      changed = true;
+    }
   }
   for (const [id, w] of Object.entries(remote.watched || {})) {
     const local = state.watched[id];
@@ -139,18 +150,58 @@ export function removeChannel(id) {
 export const channelList = () =>
   Object.values(state.channels).sort((a, b) => a.title.localeCompare(b.title, 'it'));
 
+// ---------- filtri per canale ----------
+// Ogni canale può avere regole sul titolo: "mostra solo ciò che corrisponde"
+// (es. solo un podcast) oppure "nascondi ciò che corrisponde" (es. una rubrica
+// che non interessa). I video esclusi restano in cache ma spariscono da Home,
+// Video, Shorts, contatori e ricerca — in automatico, anche per i video futuri.
+
+export function channelFilterInfo(ch) {
+  const f = ch?.filters;
+  if (!f || f.mode === 'all' || !Array.isArray(f.terms) || !f.terms.length) return null;
+  return f;
+}
+
+function titleMatches(title, terms) {
+  const t = (title || '').toLowerCase();
+  return terms.some((k) => k && t.includes(k.toLowerCase()));
+}
+
+export function isExcluded(v) {
+  const ch = state.channels[v.ch];
+  if (!ch) return false;
+  if (ch.noShorts && v.isShort) return true;
+  const f = channelFilterInfo(ch);
+  if (!f) return false;
+  const m = titleMatches(v.title, f.terms);
+  return f.mode === 'include' ? !m : m;
+}
+
+export function setChannelFilter(id, { mode = 'all', terms = [], noShorts = false } = {}) {
+  const ch = state.channels[id];
+  if (!ch) return;
+  const clean = terms.map((t) => t.trim()).filter(Boolean);
+  ch.filters = mode === 'all' || !clean.length ? null : { mode, terms: clean };
+  ch.noShorts = Boolean(noShorts);
+  ch.fUpd = Date.now();
+  touch();
+  emit();
+}
+
 // ---------- video ----------
 
-export function videosOf(channelId) {
+export function videosOf(channelId, { includeExcluded = false } = {}) {
   return Object.values(state.videos)
     .filter((v) => v.ch === channelId)
+    .filter((v) => includeExcluded || !isExcluded(v))
     .sort((a, b) => new Date(b.pub) - new Date(a.pub));
 }
 
-export function allVideos({ shorts = null } = {}) {
+export function allVideos({ shorts = null, includeExcluded = false } = {}) {
   let list = Object.values(state.videos);
   if (shorts === true) list = list.filter((v) => v.isShort);
   if (shorts === false) list = list.filter((v) => !v.isShort);
+  if (!includeExcluded) list = list.filter((v) => !isExcluded(v));
   return list.sort((a, b) => new Date(b.pub) - new Date(a.pub));
 }
 
@@ -238,8 +289,8 @@ export async function refreshChannel(channel) {
     state.videos[v.id] = prev ? { ...prev, ...v, probed: prev.probed, isShort: prev.probed ? prev.isShort : v.isShort } : v;
   }
 
-  // pota la cache del canale
-  const list = videosOf(channel.id);
+  // pota la cache del canale (compresi gli esclusi dai filtri, o non verrebbero mai eliminati)
+  const list = videosOf(channel.id, { includeExcluded: true });
   for (const old of list.slice(MAX_CACHE_PER_CHANNEL)) {
     if (!state.watchLater[old.id] && !state.progress[old.id]) delete state.videos[old.id];
   }
