@@ -12,7 +12,7 @@ vedere e riproduce tutto **dentro il sito**, senza mai aprire YouTube.
 - **Doppia sorgente dati, sempre funzionante** — YouTube **Data API v3** come sorgente primaria; se la quota finisce o la chiave non funziona, passa da solo ai **feed RSS ufficiali** di YouTube.
 - **Ricerca globale** — cerca nei tuoi canali e video, e su tutta YouTube per **nome**, **@tag** o **link**; aggiungi un canale con un click.
 - **Filtri per canale** — di un canale che pubblica più rubriche/podcast puoi tenere solo ciò che ti interessa: regole "mostra solo…" o "nascondi…" per **parole nel titolo e/o nella descrizione** e per **appartenenza alle playlist/podcast del canale** (selezionabili da un elenco), più l'opzione "niente shorts". Tutto applicato **automaticamente anche ai video futuri**, con anteprima in tempo reale, scheda "Nascosti dal filtro" e sincronizzazione nel cloud.
-- **Cronologia e tracciamento di tutto** — visti, avanzamento di riproduzione, guarda dopo, statistiche (ore guardate, video/shorts visti).
+- **Tracciamento completo + tab Statistiche** — registra cosa guardi, quali canali, per quanto tempo, a che ora e quando usi l'app. La pagina **Statistiche** mostra tempo di visione (grafico 14 giorni), Video vs Shorts, fasce orarie, classifica dei canali più guardati, giorni di fila (streak) e cronologia dettagliata delle attività. Tutto sincronizzato nel cloud.
 - **Login Google + sync cloud** — con Firebase (gratuito): stesso stato su telefono, tablet e computer, aggiornato in tempo reale.
 - **Mobile-first** — tab bar in basso, layout adattivo, installabile come app (PWA manifest).
 
@@ -46,7 +46,10 @@ Serve un progetto **Firebase** gratuito (è il modo standard per avere login Goo
 3. Incollalo in **`js/firebase-config.js`** (sostituendo i campi vuoti).
 4. **Authentication → Get started → Sign-in method** → abilita **Google**.
 5. **Authentication → Settings → Authorized domains** → aggiungi il dominio del sito (es. `tuoutente.github.io`).
-6. **Firestore Database → Create database** (production mode) → scheda **Rules** → incolla:
+6. **Firestore Database → Create database** (production mode, scegli una regione) → scheda **Rules** → incolla:
+
+   > ⚠️ **Questo passo è obbligatorio e spesso dimenticato.** L'accesso Google (Authentication) e il database (Firestore) sono due servizi separati: se attivi solo il login ma non crei il database, l'app accede ma **non salva nulla in cloud**. In quel caso YTtv te lo dice chiaramente (Profilo → "Il salvataggio in cloud non funziona") e ti indica cosa fare.
+
 
    ```
    rules_version = '2';

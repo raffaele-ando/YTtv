@@ -16,8 +16,40 @@ export const cloud = {
   user: null,            // { uid, name, email, photo }
   syncing: false,
   lastSync: 0,
-  error: null,
+  error: null,           // messaggio tecnico
+  errorHint: null,       // spiegazione + cosa fare, in italiano
+  needsSetup: false,     // true se il database Firestore non esiste / regole bloccano
 };
+
+// Traduce gli errori Firestore in messaggi comprensibili con la soluzione.
+function describeError(e) {
+  const code = e?.code || '';
+  const msg = (e?.message || String(e)).toLowerCase();
+  if (code.includes('permission-denied') || msg.includes('permission') || msg.includes('insufficient')) {
+    return {
+      hint: 'Le regole di sicurezza di Firestore bloccano il salvataggio. Apri la console Firebase → Firestore Database → scheda "Regole" e incolla le regole indicate nel README, poi Pubblica.',
+      setup: true,
+    };
+  }
+  if (msg.includes('does not exist') || msg.includes('not-found') || code.includes('not-found') || msg.includes('no document') || code.includes('unavailable')) {
+    return {
+      hint: 'Il database Firestore non è ancora stato creato in questo progetto Google. Apri console.firebase.google.com → il tuo progetto → "Firestore Database" → "Crea database" (modalità produzione), poi ricarica e riaccedi.',
+      setup: true,
+    };
+  }
+  return { hint: `Sincronizzazione non riuscita: ${e?.message || e}. Riprovo automaticamente.`, setup: false };
+}
+
+// Firestore rifiuta i valori undefined: puliamo lo snapshot in modo difensivo.
+function stripUndefined(value) {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) if (v !== undefined) out[k] = stripUndefined(v);
+    return out;
+  }
+  return value;
+}
 
 let fb = null; // moduli firebase caricati dinamicamente
 let db = null;
@@ -100,6 +132,7 @@ function docRef() {
 async function startSync() {
   if (!cloud.user || !db) return;
   cloud.syncing = true;
+  cloud.error = null; cloud.errorHint = null; cloud.needsSetup = false;
   emit('sync');
   try {
     const snap = await fb.getDoc(docRef());
@@ -109,7 +142,7 @@ async function startSync() {
       suppressPush = false;
     }
     // il merge locale può contenere cose che il cloud non ha → push
-    await pushNow();
+    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()), { merge: false });
 
     // aggiornamenti live da altri dispositivi
     stopSnapshot();
@@ -120,15 +153,32 @@ async function startSync() {
       suppressPush = true;
       mergeRemoteData(remote);
       suppressPush = false;
-    });
+    }, (err) => { handleError(err); });
+
     cloud.lastSync = Date.now();
-    cloud.error = null;
+    cloud.error = null; cloud.errorHint = null; cloud.needsSetup = false;
   } catch (e) {
-    cloud.error = e.message;
+    handleError(e);
   } finally {
     cloud.syncing = false;
     emit('sync');
   }
+}
+
+function handleError(e) {
+  const d = describeError(e);
+  cloud.error = e?.message || String(e);
+  cloud.errorHint = d.hint;
+  cloud.needsSetup = d.setup;
+  emit('sync-error');
+  emit('sync');
+}
+
+// Nuovo tentativo manuale (bottone nelle Impostazioni / Profilo).
+export async function syncNow() {
+  if (!cloud.user) throw new Error('Accedi prima con Google');
+  await startSync();
+  return !cloud.error;
 }
 
 function stopSnapshot() {
@@ -142,11 +192,11 @@ function stopSync() {
 async function pushNow() {
   if (!cloud.user || !db || suppressPush) return;
   try {
-    await fb.setDoc(docRef(), userDataSnapshot(), { merge: false });
+    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()), { merge: false });
     cloud.lastSync = Date.now();
-    cloud.error = null;
+    cloud.error = null; cloud.errorHint = null; cloud.needsSetup = false;
   } catch (e) {
-    cloud.error = e.message;
+    handleError(e);
   }
   emit('sync');
 }

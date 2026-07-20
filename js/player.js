@@ -9,8 +9,24 @@ import {
 } from './utils.js';
 import {
   state, isWatched, isWatchLater, markWatched, toggleWatchLater,
-  saveProgress, progressOf, unwatched,
+  saveProgress, progressOf, unwatched, logPlay, logWatch,
 } from './store.js';
+
+// Misura i secondi effettivamente guardati (solo mentre è in riproduzione).
+function makeMeter(videoId) {
+  let last = 0, playing = false;
+  return {
+    start() { if (!playing) { playing = true; last = Date.now(); } },
+    stop() { this.flush(); playing = false; },
+    flush() {
+      if (!playing) return;
+      const now = Date.now();
+      const delta = (now - last) / 1000;
+      last = now;
+      if (delta >= 1) logWatch(videoId, Math.min(30, delta));
+    },
+  };
+}
 
 // ---------- caricamento IFrame API ----------
 
@@ -34,6 +50,7 @@ function loadYTApi() {
 
 let filmPlayer = null;
 let filmTracker = null;
+let filmMeter = null;
 let currentVideoId = null;
 let onCloseCb = null;
 
@@ -46,6 +63,7 @@ function trackProgress(player, videoId) {
   stopTracker();
   filmTracker = setInterval(() => {
     try {
+      filmMeter?.flush();
       const t = player.getCurrentTime?.();
       const d = player.getDuration?.();
       if (t && d) saveProgress(videoId, t, d);
@@ -55,6 +73,8 @@ function trackProgress(player, videoId) {
 
 export function closePlayer() {
   stopTracker();
+  filmMeter?.stop();
+  filmMeter = null;
   try { filmPlayer?.destroy(); } catch { /* già distrutto */ }
   filmPlayer = null;
   currentVideoId = null;
@@ -161,6 +181,8 @@ export async function openPlayer(videoId, { onClose } = {}) {
   if (currentVideoId !== videoId || !$('#film-stage')) return;
 
   const resume = progressOf(videoId);
+  filmMeter = makeMeter(videoId);
+  let logged = false;
   filmPlayer = new YT.Player('film-stage', {
     videoId,
     playerVars: {
@@ -174,7 +196,13 @@ export async function openPlayer(videoId, { onClose } = {}) {
     events: {
       onReady: (ev) => trackProgress(ev.target, videoId),
       onStateChange: (ev) => {
-        if (ev.data === YT.PlayerState.ENDED) {
+        if (ev.data === YT.PlayerState.PLAYING) {
+          if (!logged) { logPlay(videoId); logged = true; }
+          filmMeter?.start();
+        } else if (ev.data === YT.PlayerState.PAUSED || ev.data === YT.PlayerState.BUFFERING) {
+          filmMeter?.stop();
+        } else if (ev.data === YT.PlayerState.ENDED) {
+          filmMeter?.stop();
           markWatched(videoId, true);
           toast('Video completato ✓');
           if (state.settings.autoplayNext && nextUp.length) {
@@ -261,6 +289,8 @@ function renderShortFrame(direction = '') {
 
   clearInterval(shortsTracker);
   try { shortsPlayer?.destroy(); } catch { /* ok */ }
+  let logged = false;
+  let stateNow = -1;
   shortsPlayer = new YT.Player('shorts-stage', {
     videoId: id,
     playerVars: {
@@ -268,11 +298,18 @@ function renderShortFrame(direction = '') {
       playlist: id, controls: 1, origin: location.origin,
     },
     events: {
+      onStateChange: (ev) => {
+        stateNow = ev.data;
+        if (ev.data === YT.PlayerState.PLAYING && !logged) { logPlay(id); logged = true; }
+      },
       onReady: () => {
-        // uno short si considera visto dopo 10s o al termine
+        // uno short si considera visto dopo 10s o al termine; nel frattempo
+        // accumuliamo il tempo di visione solo mentre è effettivamente in play
         let seen = 0;
         shortsTracker = setInterval(() => {
+          if (stateNow === YT.PlayerState.PAUSED) return;
           seen += 1;
+          logWatch(id, 1);
           if (seen >= 10 && !isWatched(id)) {
             markWatched(id, true);
             $('#sh-watched')?.classList.add('on');

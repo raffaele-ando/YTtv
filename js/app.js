@@ -8,17 +8,18 @@ import {
   fmtDuration, fmtViews, fmtSubs, timeAgo, isNew, thumbHQ, thumbMax,
 } from './utils.js';
 import {
-  state, loadLocal, onChange, emit,
+  state, loadLocal, onChange, emit, saveLocalNow,
   channelList, addChannel, removeChannel, videosOf, allVideos,
   unwatched, continueWatching, watchLaterList, historyList,
   isWatched, isWatchLater, progressOf, markWatched, toggleWatchLater,
   refreshAll, refreshChannel, refreshStatus, searchLocal, stats,
   updateSettings, exportJSON, importJSON, resetAll,
   channelFilterInfo, isExcluded, setChannelFilter,
+  analytics, recentActivity, clearActivity, startSession, sessionHeartbeat, logEvent,
 } from './store.js';
 import { resolveChannelInput, searchChannels, getChannelPlaylists, getPlaylistVideoIds } from './api.js';
 import { openPlayer, openShortsPlayer, shortThumbHTML } from './player.js';
-import { cloud, initCloud, signIn, signOutUser, onAuthChange } from './cloud.js';
+import { cloud, initCloud, signIn, signOutUser, onAuthChange, syncNow } from './cloud.js';
 import { isFirebaseConfigured } from './firebase-config.js';
 
 // ============================================================
@@ -389,6 +390,7 @@ async function doSearch(query, includeYouTube) {
   $('#btn-yt-search')?.addEventListener('click', () => doSearch(q, true));
 
   if (!includeYouTube) return;
+  logEvent('search', { q });
 
   const ytBox = $(`#${ytBoxId}`);
   try {
@@ -437,6 +439,7 @@ async function doSearch(query, includeYouTube) {
 async function addChannelFlow(channel) {
   const added = addChannel(channel);
   if (!added) { toast('Canale già presente'); return; }
+  logEvent('channel_add', { ch: channel.id, title: channel.title });
   toast(`Aggiunto: ${channel.title}`);
   try {
     await refreshChannel(channel);
@@ -558,7 +561,7 @@ async function channelCardHandler(e) {
       message: 'Il canale e i suoi video spariranno dalla tua TV. La cronologia dei visti resta salvata.',
       okLabel: 'Rimuovi', danger: true,
     });
-    if (ok) { removeChannel(id); toast(`Rimosso: ${ch.title}`); renderChannels(); }
+    if (ok) { removeChannel(id); logEvent('channel_remove', { ch: id, title: ch.title }); toast(`Rimosso: ${ch.title}`); renderChannels(); }
     return;
   }
   if (e.target.closest('[data-filter]')) {
@@ -859,21 +862,32 @@ function renderProfile() {
       <div>
         <h2>${u ? esc(u.name) : 'Ospite'}</h2>
         <div class="mail">${u ? esc(u.email) : 'Accedi con Google per sincronizzare tutto su ogni dispositivo'}</div>
-        <div class="syncline ${u ? 'on' : ''}">
+        <div class="syncline ${u && !cloud.error ? 'on' : ''} ${u && cloud.error ? 'err' : ''}">
           <span class="led"></span>
           ${u
-            ? `Sync cloud attivo${cloud.lastSync ? ` · ${timeAgo(cloud.lastSync)}` : ''}`
+            ? (cloud.error ? 'Sincronizzazione non riuscita' : `Sync cloud attivo${cloud.lastSync ? ` · ${timeAgo(cloud.lastSync)}` : ''}`)
             : configured ? 'Solo su questo dispositivo' : 'Cloud non configurato · vedi Impostazioni'}
         </div>
       </div>
       <div class="actions">
         ${u
-          ? `<button class="btn btn-ghost btn-sm" id="prof-logout">Esci</button>`
+          ? `${cloud.error ? `<button class="btn btn-accent btn-sm" id="prof-sync">${icon('refresh', 16)} Riprova sync</button>` : `<button class="btn btn-ghost btn-sm" id="prof-sync">${icon('cloud', 16)} Sincronizza ora</button>`}
+             <button class="btn btn-ghost btn-sm" id="prof-logout">Esci</button>`
           : configured
             ? `<button class="btn btn-google" id="prof-login"><svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.27-4.74 3.27-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.1c-.22-.66-.35-1.36-.35-2.1s.13-1.44.35-2.1V7.06H2.18A10.96 10.96 0 0 0 1 12c0 1.77.43 3.45 1.18 4.94l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg> Accedi con Google</button>`
             : `<a class="btn btn-ghost btn-sm" href="#/settings">${icon('gear', 16)} Configura il cloud</a>`}
       </div>
     </div>
+
+    ${u && cloud.error ? `
+      <div class="cloud-alert">
+        ${icon('info', 20)}
+        <div>
+          <b>Il salvataggio in cloud non funziona</b>
+          <p>${esc(cloud.errorHint || cloud.error)}</p>
+        </div>
+        <button class="btn btn-sm btn-accent" id="prof-sync2">${icon('refresh', 16)} Riprova</button>
+      </div>` : ''}
 
     <div class="stat-grid">
       <div class="stat-card"><div class="num">${s.channels}</div><div class="lbl">Canali</div></div>
@@ -882,6 +896,10 @@ function renderProfile() {
       <div class="stat-card ok"><div class="num">${s.watchedVideos}</div><div class="lbl">Video visti</div></div>
       <div class="stat-card ok"><div class="num">${s.watchedShorts}</div><div class="lbl">Shorts visti</div></div>
       <div class="stat-card"><div class="num">${s.hours}</div><div class="lbl">Ore guardate</div></div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
+      <a class="btn btn-ghost btn-sm" href="#/stats">${icon('bolt', 16)} Statistiche complete</a>
     </div>
 
     <h2 class="section-title" style="margin-left:0">${icon('clock', 20)} Cronologia</h2>
@@ -908,6 +926,16 @@ function renderProfile() {
     toast('Sei uscito. I dati restano su questo dispositivo.');
     renderProfile();
   });
+  const doSync = async (btn) => {
+    btn?.classList.add('spin');
+    try {
+      const ok = await syncNow();
+      toast(ok ? 'Sincronizzazione completata ✓' : (cloud.errorHint || 'Sync non riuscita'), ok ? 'ok' : 'err', ok ? 3000 : 6000);
+    } catch (e) { toast(e.message, 'err'); }
+    renderProfile();
+  };
+  $('#prof-sync')?.addEventListener('click', (e) => doSync(e.currentTarget));
+  $('#prof-sync2')?.addEventListener('click', (e) => doSync(e.currentTarget));
 
   $('.history-list')?.addEventListener('click', (e) => {
     const item = e.target.closest('.history-item');
@@ -951,9 +979,21 @@ function renderSettings() {
       <div class="setting-card">
         <h3>${icon('cloud', 19)} Cloud e account Google</h3>
         ${configured
-          ? `<p>Firebase configurato <span class="badge-ok">✓</span> — accedi dal Profilo per sincronizzare canali, visti e preferenze su tutti i dispositivi, in tempo reale.</p>
-             ${cloud.user ? `<p>Connesso come <b>${esc(cloud.user.email)}</b> <span class="badge-ok">sync attivo</span></p>` : ''}
-             ${cloud.error ? `<p class="badge-err">Errore sync: ${esc(cloud.error)}</p>` : ''}`
+          ? `<p>Firebase configurato <span class="badge-ok">✓</span> — accedi dal Profilo per sincronizzare canali, visti, statistiche e preferenze su tutti i dispositivi, in tempo reale.</p>
+             ${cloud.user && !cloud.error ? `<p>Connesso come <b>${esc(cloud.user.email)}</b> <span class="badge-ok">sync attivo</span></p>` : ''}
+             ${cloud.user && cloud.error ? `
+               <div class="cloud-alert" style="margin:4px 0 14px">
+                 ${icon('info', 20)}
+                 <div><b>Salvataggio in cloud non riuscito</b><p>${esc(cloud.errorHint || cloud.error)}</p></div>
+                 <button class="btn btn-sm btn-accent" id="set-sync">${icon('refresh', 16)} Riprova</button>
+               </div>
+               ${cloud.needsSetup ? `<ol style="color:var(--text-2);font-size:13.5px;line-height:1.9;margin:0 0 6px;padding-left:20px">
+                 <li>Apri <b>console.firebase.google.com</b> → il tuo progetto</li>
+                 <li>Menu <b>Firestore Database</b> → <b>Crea database</b> → modalità <b>produzione</b> → scegli una regione</li>
+                 <li>Scheda <b>Regole</b> → incolla le regole del README → <b>Pubblica</b></li>
+                 <li>Torna qui, ricarica e premi <b>Riprova</b></li>
+               </ol>` : ''}` : ''}
+             ${!cloud.user ? `<p class="hint">Non risulti connesso. Accedi con Google dal Profilo per attivare il salvataggio in cloud.</p>` : ''}`
           : `<p><span class="badge-warn">Cloud non ancora configurato.</span> Il sito funziona comunque: tutto viene salvato su questo dispositivo. Per il login Google e la sincronizzazione multi-dispositivo servono 5 minuti:</p>
              <ol style="color:var(--text-2);font-size:13.5px;line-height:1.9;margin:0 0 14px;padding-left:20px">
                <li>Crea un progetto gratuito su <b>console.firebase.google.com</b></li>
@@ -1000,6 +1040,15 @@ function renderSettings() {
     </div>
   </div>`;
 
+  $('#set-sync')?.addEventListener('click', async (e) => {
+    e.currentTarget.classList.add('spin');
+    try {
+      const ok = await syncNow();
+      toast(ok ? 'Sincronizzazione completata ✓' : (cloud.errorHint || 'Sync non riuscita'), ok ? 'ok' : 'err', ok ? 3000 : 6000);
+    } catch (err) { toast(err.message, 'err'); }
+    renderSettings();
+  });
+
   $('#save-api').addEventListener('click', () => {
     updateSettings({
       apiKey: $('#set-apikey').value.trim(),
@@ -1040,6 +1089,157 @@ function renderSettings() {
   });
 }
 
+// ---------------- Statistiche ----------------
+
+function humanTime(sec) {
+  sec = Math.round(sec || 0);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${sec}s`;
+}
+
+const EVENT_LABEL = {
+  play: (e) => `Hai guardato <b>${esc(e.title || 'un video')}</b>${e.short ? ' (Short)' : ''}`,
+  open: () => 'Hai aperto YTtv',
+  search: (e) => `Ricerca: <b>${esc(e.q || '')}</b>`,
+  channel_add: (e) => `Nuovo canale seguito: <b>${esc(e.title || '')}</b>`,
+  channel_remove: (e) => `Canale rimosso: <b>${esc(e.title || '')}</b>`,
+  refresh: () => 'Aggiornamento dei canali',
+};
+
+function barChart(series, key, color) {
+  const max = Math.max(1, ...series.map((d) => d[key]));
+  return `
+  <div class="chart-bars">
+    ${series.map((d) => {
+      const h = Math.round((d[key] / max) * 100);
+      const val = key === 'sec' ? humanTime(d[key]) : d[key];
+      return `
+      <div class="chart-bar" title="${esc(d.label)}: ${val}">
+        <div class="chart-bar-track">
+          <div class="chart-bar-fill" style="height:${d[key] ? Math.max(3, h) : 0}%;background:${color}"></div>
+        </div>
+        <span class="chart-bar-x">${esc(d.label.split(' ')[0])}</span>
+      </div>`;
+    }).join('')}
+  </div>`;
+}
+
+function renderStats() {
+  if (!channelList().length) {
+    view.innerHTML = `<div class="page">${emptyHTML('info', 'Ancora nessun dato', 'Aggiungi qualche canale e inizia a guardare: qui vedrai tempo di visione, canali preferiti, abitudini e molto altro.', `<a class="btn btn-accent" href="#/channels">${icon('plus', 20)} Aggiungi un canale</a>`)}</div>`;
+    return;
+  }
+
+  const a = analytics(14);
+  const totalPlays = a.videoPlays + a.shortPlays;
+  const maxCh = Math.max(1, ...a.topChannels.map((c) => c.sec));
+  const maxHour = Math.max(1, ...a.hours);
+  const events = recentActivity(50);
+
+  view.innerHTML = `
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">Statistiche</h1>
+        <p class="page-sub">Tutto ciò che guardi e fai, tracciato e sincronizzato</p>
+      </div>
+    </div>
+
+    <div class="stat-grid">
+      <div class="stat-card"><div class="num">${humanTime(a.totalSec)}</div><div class="lbl">Tempo di visione</div></div>
+      <div class="stat-card accent"><div class="num">${totalPlays}</div><div class="lbl">Riproduzioni</div></div>
+      <div class="stat-card ok"><div class="num">${a.streak}</div><div class="lbl">Giorni di fila 🔥</div></div>
+      <div class="stat-card"><div class="num">${humanTime(a.avgDaySec)}</div><div class="lbl">Media al giorno</div></div>
+      <div class="stat-card shorts"><div class="num">${humanTime(a.appSecTotal)}</div><div class="lbl">Tempo nell'app</div></div>
+      <div class="stat-card"><div class="num">${a.activeDays}</div><div class="lbl">Giorni attivi</div></div>
+    </div>
+
+    <section class="stat-block">
+      <h2 class="section-title" style="margin-left:0">${icon('clock', 20)} Tempo di visione · ultimi 14 giorni</h2>
+      ${a.totalSec ? barChart(a.series, 'sec', 'linear-gradient(180deg,var(--accent-hi),var(--accent))') : `<p class="hint">Nessuna visione registrata ancora.</p>`}
+    </section>
+
+    <div class="stat-two">
+      <section class="stat-block">
+        <h2 class="section-title" style="margin-left:0">${icon('film', 20)} Video vs Shorts</h2>
+        <div class="split-card">
+          <div class="split-row">
+            <span class="split-label">${icon('film', 16)} Video</span>
+            <div class="split-track"><i style="width:${totalPlays ? Math.round(a.videoPlays / totalPlays * 100) : 0}%;background:var(--accent)"></i></div>
+            <b>${a.videoPlays}</b>
+          </div>
+          <div class="split-row">
+            <span class="split-label" style="color:var(--shorts)">${icon('bolt', 16)} Shorts</span>
+            <div class="split-track"><i style="width:${totalPlays ? Math.round(a.shortPlays / totalPlays * 100) : 0}%;background:var(--shorts)"></i></div>
+            <b>${a.shortPlays}</b>
+          </div>
+          <div class="split-foot">
+            <span>${humanTime(a.videoSec)} sui video</span>
+            <span>${humanTime(a.shortSec)} sugli shorts</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="stat-block">
+        <h2 class="section-title" style="margin-left:0">${icon('clock', 20)} Quando guardi</h2>
+        <div class="hour-chart">
+          ${a.hours.map((h, i) => `
+            <div class="hour-bar" title="${i}:00 — ${h} riproduzioni">
+              <div class="hour-fill" style="height:${h ? Math.max(4, Math.round(h / maxHour * 100)) : 0}%"></div>
+              ${i % 6 === 0 ? `<span>${i}</span>` : ''}
+            </div>`).join('')}
+        </div>
+      </section>
+    </div>
+
+    <section class="stat-block">
+      <h2 class="section-title" style="margin-left:0">${icon('users', 20)} Canali più guardati</h2>
+      ${a.topChannels.length ? `
+        <div class="top-ch-list">
+          ${a.topChannels.slice(0, 8).map((c) => `
+            <a class="top-ch" ${state.channels[c.ch] ? `href="#/channel/${c.ch}"` : ''}>
+              <img src="${esc(c.thumb)}" alt="" onerror="this.style.visibility='hidden'">
+              <div class="top-ch-info">
+                <b>${esc(c.title)}</b>
+                <div class="top-ch-track"><i style="width:${Math.round(c.sec / maxCh * 100)}%"></i></div>
+              </div>
+              <span class="top-ch-val">${humanTime(c.sec)}<small>${c.plays} rip.</small></span>
+            </a>`).join('')}
+        </div>` : `<p class="hint">Guarda qualche video per vedere qui la classifica dei tuoi canali.</p>`}
+    </section>
+
+    <section class="stat-block">
+      <h2 class="section-title" style="margin-left:0">${icon('bolt', 20)} Attività recente</h2>
+      ${events.length ? `
+        <div class="activity-feed">
+          ${events.map((e) => `
+            <div class="activity-item ${e.id ? 'clickable' : ''}" ${e.id ? `data-open-v="${e.id}"` : ''}>
+              <span class="activity-dot ${e.type}"></span>
+              <span class="activity-text">${(EVENT_LABEL[e.type] || (() => e.type))(e)}</span>
+              <span class="activity-time">${timeAgo(e.t)}</span>
+            </div>`).join('')}
+        </div>` : `<p class="hint">Le tue azioni compariranno qui.</p>`}
+      <button class="btn btn-ghost btn-sm" id="stats-clear" style="margin-top:16px">${icon('trash', 16)} Azzera statistiche</button>
+    </section>
+  </div>`;
+
+  $('.activity-feed')?.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-open-v]');
+    if (item && state.videos[item.dataset.openV]) openPlayer(item.dataset.openV, { onClose: renderRoute });
+  });
+  $('#stats-clear').addEventListener('click', async () => {
+    const ok = await confirmModal({
+      title: 'Azzerare le statistiche?',
+      message: 'Tempo di visione, cronologia attività e sessioni verranno cancellati (su tutti i dispositivi). Canali e "visti" restano.',
+      okLabel: 'Azzera', danger: true,
+    });
+    if (ok) { clearActivity(); toast('Statistiche azzerate'); renderStats(); }
+  });
+}
+
 // ============================================================
 // Router
 // ============================================================
@@ -1051,6 +1251,7 @@ const routes = {
   search: () => renderSearch(lastSearchQuery),
   channels: renderChannels,
   profile: renderProfile,
+  stats: renderStats,
   settings: renderSettings,
 };
 
@@ -1220,6 +1421,8 @@ function updateAvatarButton() {
 // Avvio
 // ============================================================
 
+let syncErrorShown = false;
+
 async function boot() {
   loadLocal();
   window.addEventListener('hashchange', renderRoute);
@@ -1227,17 +1430,36 @@ async function boot() {
   if (!location.hash) location.hash = '#/home';
   renderRoute();
 
+  // registra la sessione d'uso e tiene il conto del tempo passato nell'app
+  startSession();
+  let hbCount = 0;
+  setInterval(() => {
+    if (document.hidden) return;
+    sessionHeartbeat(15);
+    // ogni ~2 min aggiorna la vista statistiche se aperta, senza disturbare le altre
+    if (++hbCount % 8 === 0 && currentRoute === 'stats') renderStats();
+  }, 15000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) saveLocalNow();
+  });
+  window.addEventListener('pagehide', saveLocalNow);
+
   onChange((what) => {
     // ridisegna quando arrivano dati da altri dispositivi o si affinano gli shorts
-    if (['remote-merge', 'shorts-refined', 'auth'].includes(what)) {
+    if (['remote-merge', 'shorts-refined', 'auth', 'sync'].includes(what)) {
       updateAvatarButton();
-      renderRoute();
+      if (what !== 'sync') renderRoute();
     }
+    if (what === 'sync-error' && cloud.user && !syncErrorShown) {
+      syncErrorShown = true;
+      toast(cloud.errorHint || 'Sincronizzazione cloud non riuscita', 'err', 7000);
+    }
+    if (what === 'sync' && cloud.user && !cloud.error) syncErrorShown = false;
   });
 
   onAuthChange((u) => {
     updateAvatarButton();
-    if (u) toast(`Ciao ${u.name.split(' ')[0]}! Sync cloud attivo`);
+    if (u) { syncErrorShown = false; toast(`Ciao ${u.name.split(' ')[0]}! Attivo la sincronizzazione…`); }
   });
 
   initCloud();

@@ -22,6 +22,12 @@ const emptyState = () => ({
   watched: {},    // videoId -> {at, t? (sec visti)}
   progress: {},   // videoId -> {t, d, at}  (riproduzione parziale)
   watchLater: {}, // videoId -> at
+  watchTime: {},  // videoId -> {sec, plays, first, last, ch, title, short}  (tempo di visione cumulativo)
+  activity: {
+    daily: {},    // 'YYYY-MM-DD' -> {sec, plays, shorts, opens, appSec}
+    events: [],   // cronologia dettagliata: {t, type, id?, ch?, title?, short?, q?, sec?}
+    sessions: [], // {t, dur} sessioni d'uso dell'app
+  },
   settings: defaultSettings(),
   meta: { updatedAt: 0, lastRefresh: 0 },
 });
@@ -44,15 +50,20 @@ export function loadLocal() {
     Object.assign(state, emptyState(), data);
     state.settings = { ...defaultSettings(), ...(data.settings || {}) };
   } catch { /* stato corrotto → si riparte puliti */ }
+  // normalizza le strutture di tracciamento per gli stati salvati da versioni precedenti
+  state.watchTime = state.watchTime || {};
+  state.activity = { daily: {}, events: [], sessions: [], ...(state.activity || {}) };
   setApiKey(state.settings.apiKey);
 }
 
 let saveTimer = null;
 export function saveLocal() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch { /* quota piena */ }
-  }, 150);
+  saveTimer = setTimeout(saveLocalNow, 150);
+}
+export function saveLocalNow() {
+  clearTimeout(saveTimer);
+  try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch { /* quota piena */ }
 }
 
 function touch() {
@@ -80,6 +91,12 @@ export function userDataSnapshot() {
     watched: state.watched,
     progress: state.progress,
     watchLater: state.watchLater,
+    watchTime: state.watchTime,
+    activity: {
+      daily: state.activity.daily,
+      events: state.activity.events.slice(0, 250),
+      sessions: state.activity.sessions.slice(0, 120),
+    },
     settings: state.settings,
     meta: { updatedAt: state.meta.updatedAt },
   };
@@ -114,6 +131,61 @@ export function mergeRemoteData(remote) {
   for (const [id, at] of Object.entries(remote.watchLater || {})) {
     if (!state.watchLater[id]) { state.watchLater[id] = at; changed = true; }
   }
+  // tempo di visione: unione conservativa (max), non somma → mai gonfiato tra dispositivi
+  for (const [id, r] of Object.entries(remote.watchTime || {})) {
+    const l = state.watchTime[id];
+    if (!l) { state.watchTime[id] = { ...r }; changed = true; }
+    else {
+      const merged = {
+        sec: Math.max(l.sec || 0, r.sec || 0),
+        plays: Math.max(l.plays || 0, r.plays || 0),
+        first: Math.min(l.first || r.first || 0, r.first || l.first || 0) || (l.first || r.first || 0),
+        last: Math.max(l.last || 0, r.last || 0),
+        ch: l.ch || r.ch || null,
+        title: l.title || r.title || '',
+        short: l.short ?? r.short ?? false,
+      };
+      if (JSON.stringify(merged) !== JSON.stringify(l)) { state.watchTime[id] = merged; changed = true; }
+    }
+  }
+  // aggregati giornalieri: max per campo per giorno (evita doppi conteggi al riallineamento)
+  const rDaily = remote.activity?.daily || {};
+  for (const [dk, d] of Object.entries(rDaily)) {
+    const l = state.activity.daily[dk];
+    if (!l) { state.activity.daily[dk] = { ...d }; changed = true; }
+    else {
+      for (const k of ['sec', 'plays', 'shorts', 'opens', 'appSec']) {
+        const nv = Math.max(l[k] || 0, d[k] || 0);
+        if (nv !== (l[k] || 0)) { l[k] = nv; changed = true; }
+      }
+    }
+  }
+  // cronologia eventi: unione con dedup, ordinata per tempo, limitata
+  const rEvents = remote.activity?.events || [];
+  if (rEvents.length) {
+    const key = (e) => `${e.t}|${e.type}|${e.id || ''}`;
+    const seen = new Set(state.activity.events.map(key));
+    let added = false;
+    for (const e of rEvents) if (!seen.has(key(e))) { state.activity.events.push(e); seen.add(key(e)); added = true; }
+    if (added) {
+      state.activity.events.sort((a, b) => b.t - a.t);
+      state.activity.events.length = Math.min(state.activity.events.length, 250);
+      changed = true;
+    }
+  }
+  // sessioni: unione per timestamp d'inizio
+  const rSessions = remote.activity?.sessions || [];
+  if (rSessions.length) {
+    const seenS = new Set(state.activity.sessions.map((s) => s.t));
+    let added = false;
+    for (const s of rSessions) if (!seenS.has(s.t)) { state.activity.sessions.push(s); seenS.add(s.t); added = true; }
+    if (added) {
+      state.activity.sessions.sort((a, b) => b.t - a.t);
+      state.activity.sessions.length = Math.min(state.activity.sessions.length, 120);
+      changed = true;
+    }
+  }
+
   const remoteUpd = remote.settings?.updatedAt || 0;
   if (remoteUpd > (state.settings.updatedAt || 0)) {
     state.settings = { ...defaultSettings(), ...remote.settings };
@@ -313,6 +385,163 @@ export function updateSettings(patch) {
   emit('settings');
 }
 
+// ============================================================
+// Tracciamento attività: cosa guardi, chi, per quanto, quando
+// ============================================================
+
+export function dateKey(ts = Date.now()) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function dailyEntry(ts = Date.now()) {
+  const k = dateKey(ts);
+  return (state.activity.daily[k] ||= { sec: 0, plays: 0, shorts: 0, opens: 0, appSec: 0 });
+}
+
+function watchEntry(videoId) {
+  const v = state.videos[videoId];
+  const wt = (state.watchTime[videoId] ||= {
+    sec: 0, plays: 0, first: Date.now(), last: 0, ch: v?.ch || null, title: v?.title || '', short: !!v?.isShort,
+  });
+  if (v) { wt.ch = v.ch; wt.title = v.title; wt.short = !!v.isShort; }
+  return wt;
+}
+
+export function logEvent(type, meta = {}) {
+  const ev = { t: Date.now(), type };
+  for (const [k, val] of Object.entries(meta)) if (val != null) ev[k] = val;
+  state.activity.events.unshift(ev);
+  if (state.activity.events.length > 250) state.activity.events.length = 250;
+  saveLocal();
+  cloudPush?.();
+}
+
+// Chiamata all'avvio di una riproduzione (una volta per apertura del player).
+export function logPlay(videoId) {
+  const v = state.videos[videoId];
+  const wt = watchEntry(videoId);
+  wt.plays++;
+  wt.last = Date.now();
+  const d = dailyEntry();
+  d.plays++;
+  if (v?.isShort) d.shorts++;
+  logEvent('play', { id: videoId, ch: v?.ch, title: v?.title, short: !!v?.isShort });
+  state.meta.updatedAt = Date.now();
+}
+
+// Accumula secondi realmente guardati di un video.
+export function logWatch(videoId, sec) {
+  sec = Math.round(sec);
+  if (!sec || sec < 0 || sec > 3600) return;
+  const wt = watchEntry(videoId);
+  wt.sec += sec;
+  wt.last = Date.now();
+  dailyEntry().sec += sec;
+  state.meta.updatedAt = Date.now();
+  saveLocal();
+  cloudPush?.();
+}
+
+// ---------- sessioni d'uso dell'app ----------
+
+let currentSession = null;
+
+export function startSession() {
+  currentSession = { t: Date.now(), dur: 0 };
+  state.activity.sessions.unshift(currentSession);
+  if (state.activity.sessions.length > 120) state.activity.sessions.length = 120;
+  dailyEntry().opens++;
+  logEvent('open');
+}
+
+export function sessionHeartbeat(sec) {
+  if (!currentSession) return;
+  currentSession.dur += sec;
+  dailyEntry().appSec += sec;
+  state.meta.updatedAt = Date.now();
+  saveLocal();
+  cloudPush?.();
+}
+
+// ---------- analisi per la pagina Statistiche ----------
+
+export function analytics(days = 14) {
+  const times = Object.entries(state.watchTime);
+  let totalSec = 0, totalPlays = 0, videoSec = 0, shortSec = 0, videoPlays = 0, shortPlays = 0;
+  const byChannel = {};
+  for (const [, wt] of times) {
+    totalSec += wt.sec || 0;
+    totalPlays += wt.plays || 0;
+    if (wt.short) { shortSec += wt.sec || 0; shortPlays += wt.plays || 0; }
+    else { videoSec += wt.sec || 0; videoPlays += wt.plays || 0; }
+    if (wt.ch) {
+      const c = (byChannel[wt.ch] ||= { ch: wt.ch, sec: 0, plays: 0 });
+      c.sec += wt.sec || 0; c.plays += wt.plays || 0;
+    }
+  }
+
+  const topChannels = Object.values(byChannel)
+    .map((c) => ({ ...c, title: state.channels[c.ch]?.title || 'Canale rimosso', thumb: state.channels[c.ch]?.thumb || '' }))
+    .sort((a, b) => b.sec - a.sec);
+
+  // serie temporale ultimi N giorni
+  const series = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const ts = Date.now() - i * 86400000;
+    const k = dateKey(ts);
+    const d = state.activity.daily[k] || { sec: 0, plays: 0, shorts: 0, opens: 0, appSec: 0 };
+    const date = new Date(ts);
+    series.push({
+      key: k,
+      label: date.toLocaleDateString('it-IT', { day: 'numeric', month: 'short' }),
+      weekday: date.toLocaleDateString('it-IT', { weekday: 'short' }),
+      sec: d.sec || 0, plays: d.plays || 0, shorts: d.shorts || 0, videos: (d.plays || 0) - (d.shorts || 0),
+      opens: d.opens || 0, appSec: d.appSec || 0,
+    });
+  }
+
+  // distribuzione per fascia oraria (dai plays negli eventi)
+  const hours = Array.from({ length: 24 }, () => 0);
+  for (const e of state.activity.events) {
+    if (e.type === 'play') hours[new Date(e.t).getHours()]++;
+  }
+
+  // streak di giorni consecutivi con attività
+  let streak = 0;
+  for (let i = 0; ; i++) {
+    const k = dateKey(Date.now() - i * 86400000);
+    const d = state.activity.daily[k];
+    if (d && ((d.plays || 0) > 0 || (d.appSec || 0) > 30)) streak++;
+    else if (i === 0) continue; // oggi ancora senza attività: non spezza lo streak di ieri
+    else break;
+  }
+
+  const appSecTotal = state.activity.sessions.reduce((s, x) => s + (x.dur || 0), 0);
+  const activeDays = Object.values(state.activity.daily).filter((d) => (d.plays || 0) > 0 || (d.appSec || 0) > 30).length;
+
+  return {
+    totalSec, totalPlays, videoSec, shortSec, videoPlays, shortPlays,
+    topChannels, series, hours, streak,
+    appSecTotal, activeDays,
+    sessions: state.activity.sessions.length,
+    avgDaySec: activeDays ? Math.round(totalSec / activeDays) : 0,
+    watchedDistinct: Object.keys(state.watched).length,
+  };
+}
+
+export function recentActivity(limit = 40) {
+  return state.activity.events.slice(0, limit);
+}
+
+export function clearActivity() {
+  state.watchTime = {};
+  state.activity = { daily: {}, events: [], sessions: [] };
+  currentSession = null;
+  touch();
+  emit();
+}
+
 // ---------- refresh dei contenuti ----------
 
 export const refreshStatus = { running: false, done: 0, total: 0, errors: [] };
@@ -400,11 +629,15 @@ export function searchLocal(query) {
 
 export function stats() {
   const watchedEntries = Object.keys(state.watched);
-  let watchedVideos = 0, watchedShorts = 0, seconds = 0;
+  let watchedVideos = 0, watchedShorts = 0;
   for (const id of watchedEntries) {
     const v = state.videos[id];
     if (v?.isShort) watchedShorts++; else watchedVideos++;
-    if (v?.dur) seconds += v.dur;
+  }
+  // ore reali di visione dal tempo tracciato (fallback sulla durata dei visti)
+  let seconds = Object.values(state.watchTime).reduce((s, wt) => s + (wt.sec || 0), 0);
+  if (!seconds) {
+    for (const id of watchedEntries) { const v = state.videos[id]; if (v?.dur) seconds += v.dur; }
   }
   return {
     channels: Object.keys(state.channels).length,
