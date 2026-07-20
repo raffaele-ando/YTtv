@@ -5,7 +5,7 @@
 // Se firebase-config.js non è compilato, tutte le funzioni restano inerti
 // e l'app continua a funzionare in locale.
 
-import { firebaseConfig, isFirebaseConfigured } from './firebase-config.js';
+import { firebaseConfig, isFirebaseConfigured, firestoreDatabaseId } from './firebase-config.js';
 import {
   state, userDataSnapshot, mergeRemoteData, setCloudPush, emit,
 } from './store.js';
@@ -33,7 +33,7 @@ function describeError(e) {
   }
   if (msg.includes('does not exist') || msg.includes('not-found') || code.includes('not-found') || msg.includes('no document') || code.includes('unavailable')) {
     return {
-      hint: 'Il database Firestore non è ancora stato creato in questo progetto Google. Apri console.firebase.google.com → il tuo progetto → "Firestore Database" → "Crea database" (modalità produzione), poi ricarica e riaccedi.',
+      hint: 'Il database Cloud Firestore non risulta creato. Attenzione: NON è il "Realtime Database" (prodotto diverso). Vai su console.firebase.google.com → il tuo progetto → menu "Cloud Firestore" (o "Firestore Database") → "Crea database" → modalità Nativa/Produzione → scegli una regione. Deve chiamarsi "(default)". Poi ricarica il sito.',
       setup: true,
     };
   }
@@ -78,7 +78,9 @@ export async function initCloud() {
     await loadFirebase();
     const app = fb.initializeApp(firebaseConfig);
     auth = fb.getAuth(app);
-    db = fb.getFirestore(app);
+    db = (firestoreDatabaseId && firestoreDatabaseId !== '(default)')
+      ? fb.getFirestore(app, firestoreDatabaseId)
+      : fb.getFirestore(app);
     setCloudPush(pushDebounced);
 
     fb.onAuthStateChanged(auth, async (user) => {

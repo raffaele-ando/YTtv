@@ -33,5 +33,11 @@ export const firebaseConfig = {
   appId: "1:646615244971:web:7d9ea1288772867e3ed7ee"
 };
 
+// ID del database Firestore. Lascia "(default)" a meno che, creando il
+// database su Firebase, tu non gli abbia dato un nome diverso: in quel caso
+// scrivi qui esattamente quel nome (lo trovi in Firestore Database, in alto,
+// nel menu a tendina dei database).
+export const firestoreDatabaseId = "(default)";
+
 export const isFirebaseConfigured = () =>
   Boolean(firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId);
