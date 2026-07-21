@@ -144,7 +144,7 @@ async function startSync() {
       suppressPush = false;
     }
     // il merge locale può contenere cose che il cloud non ha → push
-    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()), { merge: false });
+    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()), { merge: true });
 
     // aggiornamenti live da altri dispositivi
     stopSnapshot();
@@ -194,7 +194,7 @@ function stopSync() {
 async function pushNow() {
   if (!cloud.user || !db || suppressPush) return;
   try {
-    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()), { merge: false });
+    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()), { merge: true });
     cloud.lastSync = Date.now();
     cloud.error = null; cloud.errorHint = null; cloud.needsSetup = false;
   } catch (e) {
