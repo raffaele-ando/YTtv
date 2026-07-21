@@ -31,7 +31,13 @@ function describeError(e) {
       setup: true,
     };
   }
-  if (msg.includes('does not exist') || msg.includes('not-found') || code.includes('not-found') || msg.includes('no document') || code.includes('unavailable')) {
+  if (code.includes('unavailable') || msg.includes('unavailable') || msg.includes('transport') || msg.includes('network') || msg.includes('failed to get') || msg.includes('backend')) {
+    return {
+      hint: 'Impossibile raggiungere Cloud Firestore: la connessione al database non si apre (capita su Safari/iPad o su reti che bloccano lo streaming). Controlla la rete e riprova; se persiste, ricarica la pagina.',
+      setup: false,
+    };
+  }
+  if (msg.includes('does not exist') || msg.includes('not-found') || code.includes('not-found') || msg.includes('no document')) {
     return {
       hint: 'Il database Cloud Firestore non risulta creato. Attenzione: NON è il "Realtime Database" (prodotto diverso). Vai su console.firebase.google.com → il tuo progetto → menu "Cloud Firestore" (o "Firestore Database") → "Crea database" → modalità Nativa/Produzione → scegli una regione. Deve chiamarsi "(default)". Poi ricarica il sito.',
       setup: true,
@@ -78,9 +84,15 @@ export async function initCloud() {
     await loadFirebase();
     const app = fb.initializeApp(firebaseConfig);
     auth = fb.getAuth(app);
+    // Su Safari/iPad (e su reti che bloccano i WebChannel) il trasporto
+    // predefinito di Firestore spesso non riesce ad aprire la connessione:
+    // letture e scritture restano appese e niente arriva sul cloud, mentre il
+    // login via HTTPS continua a funzionare. Forzare il long-polling rende la
+    // sincronizzazione affidabile su tutti i dispositivi.
+    const fsSettings = { experimentalForceLongPolling: true };
     db = (firestoreDatabaseId && firestoreDatabaseId !== '(default)')
-      ? fb.getFirestore(app, firestoreDatabaseId)
-      : fb.getFirestore(app);
+      ? fb.initializeFirestore(app, fsSettings, firestoreDatabaseId)
+      : fb.initializeFirestore(app, fsSettings);
     setCloudPush(pushDebounced);
 
     fb.onAuthStateChanged(auth, async (user) => {
