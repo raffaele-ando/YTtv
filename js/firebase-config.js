@@ -25,12 +25,13 @@
 // tutto viene salvato in locale sul dispositivo.
 
 export const firebaseConfig = {
-  apiKey: "AIzaSyDQ5fyY_nHSzi5jruHGzgEjacK54snyOy4",
-  authDomain: "gen-lang-client-0578386900.firebaseapp.com",
-  projectId: "gen-lang-client-0578386900",
-  storageBucket: "gen-lang-client-0578386900.firebasestorage.app",
-  messagingSenderId: "646615244971",
-  appId: "1:646615244971:web:7d9ea1288772867e3ed7ee"
+  apiKey: "AIzaSyARBqO5igl6JggqrQ5-jquTaWPgoLqWAFc",
+  authDomain: "yttv-a545f.firebaseapp.com",
+  projectId: "yttv-a545f",
+  storageBucket: "yttv-a545f.firebasestorage.app",
+  messagingSenderId: "1007834493117",
+  appId: "1:1007834493117:web:483b9b08716b4974c307d4",
+  measurementId: "G-NHELX8C9WS"
 };
 
 // ID del database Firestore. Lascia "(default)" a meno che, creando il
