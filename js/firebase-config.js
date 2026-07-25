@@ -30,8 +30,7 @@ export const firebaseConfig = {
   projectId: "yttv-a545f",
   storageBucket: "yttv-a545f.firebasestorage.app",
   messagingSenderId: "1007834493117",
-  appId: "1:1007834493117:web:483b9b08716b4974c307d4",
-  measurementId: "G-NHELX8C9WS"
+  appId: "1:1007834493117:web:483b9b08716b4974c307d4"
 };
 
 // ID del database Firestore. Lascia "(default)" a meno che, creando il
