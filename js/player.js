@@ -406,8 +406,10 @@ export async function openShortsPlayer(queue, index = 0, { onClose } = {}) {
   renderShortFrame();
 }
 
-// miniatura degli shorts con fallback progressivo
+// Miniatura degli shorts con fallback progressivo.
+// data-osrc tiene la sorgente originale: serve a paint() per riconoscere
+// l'immagine anche quando il fallback ne ha già cambiato il src.
 export function shortThumbHTML(id, alt = '') {
-  return `<img src="${thumbShort(id)}" alt="${esc(alt)}" loading="lazy"
+  return `<img src="${thumbShort(id)}" data-osrc="${thumbShort(id)}" alt="${esc(alt)}" loading="lazy"
     onerror="if(!this.dataset.f){this.dataset.f=1;this.src='${thumbShortHQ(id)}'}else if(this.dataset.f==1){this.dataset.f=2;this.src='${thumbHQ(id)}'}">`;
 }

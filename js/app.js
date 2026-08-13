@@ -23,6 +23,52 @@ import { cloud, initCloud, signIn, signOutUser, onAuthChange, syncNow, flushClou
 import { isFirebaseConfigured } from './firebase-config.js';
 
 // ============================================================
+// Disegno dell'interfaccia
+// ============================================================
+
+// Riscrive una parte dell'interfaccia riciclando le immagini già caricate.
+//
+// Ogni azione (segna come visto, guarda dopo, aggiornamento in background,
+// dati da un altro dispositivo…) ridisegna la vista: sostituendo l'HTML di
+// colpo, tutti gli <img> venivano distrutti e ricreati e per un istante le
+// copertine sparivano, come in un refresh della pagina. Qui, prima di
+// riscrivere, mettiamo da parte le immagini già visualizzate e le rimettiamo
+// al loro posto nel nuovo HTML: l'elemento è lo stesso, quindi resta dipinto
+// senza ricaricarsi.
+// true solo per il primo disegno dopo un cambio pagina: vedi renderRoute
+let animateNext = false;
+
+function paint(target, html) {
+  const pool = new Map(); // "classe|sorgente" -> immagini pronte da riusare
+  for (const img of target.querySelectorAll('img')) {
+    // solo quelle davvero caricate: le altre non erano visibili comunque
+    if (!img.complete || !img.naturalWidth) continue;
+    const key = `${img.className}|${img.dataset.osrc || img.getAttribute('src') || ''}`;
+    if (!pool.has(key)) pool.set(key, []);
+    pool.get(key).push(img);
+  }
+
+  if (target === viewEl) {
+    // le animazioni d'ingresso valgono per questo disegno e basta
+    viewEl.classList.toggle('nav-enter', animateNext);
+    animateNext = false;
+  }
+
+  target.innerHTML = html;
+  if (!pool.size) return;
+
+  for (const fresh of target.querySelectorAll('img')) {
+    const key = `${fresh.className}|${fresh.dataset.osrc || fresh.getAttribute('src') || ''}`;
+    const reuse = pool.get(key)?.shift();
+    if (!reuse) continue;
+    // allinea ciò che può essere cambiato nel nuovo markup, poi riusa l'elemento
+    reuse.style.cssText = fresh.style.cssText;
+    reuse.alt = fresh.alt;
+    fresh.replaceWith(reuse);
+  }
+}
+
+// ============================================================
 // Componenti
 // ============================================================
 
@@ -111,7 +157,10 @@ function emptyHTML(iconName, title, text, cta = '') {
 // Viste
 // ============================================================
 
-const view = $('#view');
+const viewEl = $('#view');
+// Tutte le viste scrivono in `view.innerHTML`: passando da paint() le copertine
+// già caricate non vengono ricreate (niente lampeggio a ogni ridisegno).
+const view = { set innerHTML(html) { paint(viewEl, html); } };
 
 function renderHome() {
   const chs = channelList();
@@ -138,7 +187,7 @@ function renderHome() {
     html += `
     <section class="hero">
       <div class="hero-bg">
-        <img src="${thumbMax(hero.id)}" alt="" onerror="this.src='${thumbHQ(hero.id)}'">
+        <img src="${thumbMax(hero.id)}" data-osrc="${thumbMax(hero.id)}" alt="" onerror="this.src='${thumbHQ(hero.id)}'">
       </div>
       <div class="hero-content">
         ${hch ? `<a class="hero-channel" href="#/channel/${hch.id}"><img src="${esc(hch.thumb)}" alt="">${esc(hch.title)}</a>` : ''}
@@ -376,7 +425,7 @@ async function doSearch(query, includeYouTube) {
     ${includeYouTube ? `<div class="skel" style="height:70px;border-radius:14px"></div>` : `<button class="btn btn-ghost" id="btn-yt-search">${icon('search', 18)} Cerca "${esc(q)}" su YouTube</button>`}
   </div></div>`;
 
-  box.innerHTML = html;
+  paint(box, html);
   $('#btn-yt-search')?.addEventListener('click', () => doSearch(q, true));
 
   if (!includeYouTube) return;
@@ -398,14 +447,14 @@ async function doSearch(query, includeYouTube) {
       ytBox.innerHTML = `<p class="hint">Nessun canale trovato su YouTube per "${esc(q)}".</p>`;
       return;
     }
-    ytBox.innerHTML = `<div class="result-list">${results.map((c) => `
+    paint(ytBox, `<div class="result-list">${results.map((c) => `
       <div class="result-item">
         <img src="${esc(c.thumb)}" alt="">
         <div class="info"><b>${esc(c.title)}</b><span>${esc(c.handle || c.description || '')}${c.subs != null ? ` · ${fmtSubs(c.subs)}` : ''}</span></div>
         ${state.channels[c.id]
           ? `<span class="badge-ok">${icon('check', 14)} Aggiunto</span>`
           : `<button class="btn btn-accent btn-sm" data-add-ch="${c.id}">${icon('plus', 16)} Aggiungi</button>`}
-      </div>`).join('')}</div>`;
+      </div>`).join('')}</div>`);
 
     ytBox.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-add-ch]');
@@ -1266,11 +1315,13 @@ function renderRoute() {
     a.classList.toggle('active', a.dataset.nav === name);
   });
 
-  // Si torna in cima solo cambiando pagina davvero: renderRoute viene chiamata
-  // anche dopo "segna come visto", un aggiornamento in background o l'arrivo di
-  // dati da un altro dispositivo, e in quei casi il salto in cima faceva
-  // perdere il punto in cui si stava scorrendo.
-  if (hash !== currentHash) {
+  // renderRoute viene chiamata anche dopo "segna come visto", un aggiornamento
+  // in background o l'arrivo di dati da un altro dispositivo. In quei casi non
+  // si torna in cima (si perdeva il punto in cui si stava scorrendo) e non si
+  // rigiocano le animazioni d'ingresso, che facevano sembrare tutto ricaricato.
+  const navigated = hash !== currentHash;
+  animateNext = navigated;
+  if (navigated) {
     currentHash = hash;
     window.scrollTo({ top: 0 });
   }
