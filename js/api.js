@@ -17,6 +17,22 @@ export class ApiError extends Error {
 
 const API_BASE = 'https://www.googleapis.com/youtube/v3';
 
+// AbortSignal.timeout manca su Safari < 16 e su vari browser in-app: senza
+// questo controllo ogni chiamata lanciava un TypeError e non partiva nemmeno
+// il fallback RSS.
+function timeoutSignal(ms) {
+  try {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      return AbortSignal.timeout(ms);
+    }
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), ms);
+    return ctrl.signal;
+  } catch {
+    return undefined;
+  }
+}
+
 async function yt(endpoint, params = {}) {
   const url = new URL(`${API_BASE}/${endpoint}`);
   for (const [k, v] of Object.entries(params)) {
@@ -24,7 +40,7 @@ async function yt(endpoint, params = {}) {
   }
   url.searchParams.set('key', apiKey);
   // senza timeout una rete lenta bloccherebbe l'interfaccia e il fallback RSS
-  const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+  const res = await fetch(url, { signal: timeoutSignal(12000) });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const reason = data?.error?.errors?.[0]?.reason || '';
@@ -176,12 +192,16 @@ export async function fetchChannelVideosRSS(channelId) {
   let xmlText = null;
   let lastErr = null;
 
-  for (const wrap of CORS_PROXIES) {
+  for (const proxy of CORS_PROXIES) {
+    // compatibilità con la vecchia forma (semplice funzione) della lista proxy
+    const wrap = typeof proxy === 'function' ? proxy : proxy.wrap;
+    const parse = typeof proxy === 'function' ? null : proxy.parse;
     try {
-      const res = await fetch(wrap(feedUrl), { signal: AbortSignal.timeout(12000) });
+      const res = await fetch(wrap(feedUrl), { signal: timeoutSignal(12000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
-      if (text.includes('<feed')) { xmlText = text; break; }
+      const raw = await res.text();
+      const text = parse ? parse(raw) : raw;
+      if (text && text.includes('<feed')) { xmlText = text; break; }
       throw new Error('Risposta non valida');
     } catch (e) {
       lastErr = e;

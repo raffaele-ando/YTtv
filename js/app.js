@@ -11,24 +11,20 @@ import {
   state, loadLocal, onChange, emit, saveLocalNow,
   channelList, addChannel, removeChannel, videosOf, allVideos,
   unwatched, continueWatching, watchLaterList, historyList,
-  isWatched, isWatchLater, progressOf, markWatched, toggleWatchLater,
-  refreshAll, refreshChannel, refreshStatus, searchLocal, stats,
+  isWatched, isWatchLater, progressOf, markWatched, markManyWatched, toggleWatchLater,
+  refreshAll, refreshChannel, refreshStatus, searchLocal, stats, videoInfo,
   updateSettings, exportJSON, importJSON, resetAll,
   channelFilterInfo, isExcluded, setChannelFilter,
   analytics, recentActivity, clearActivity, startSession, sessionHeartbeat, logEvent,
 } from './store.js';
 import { resolveChannelInput, searchChannels, getChannelPlaylists, getPlaylistVideoIds } from './api.js';
 import { openPlayer, openShortsPlayer, shortThumbHTML } from './player.js';
-import { cloud, initCloud, signIn, signOutUser, onAuthChange, syncNow } from './cloud.js';
+import { cloud, initCloud, signIn, signOutUser, onAuthChange, syncNow, flushCloud } from './cloud.js';
 import { isFirebaseConfigured } from './firebase-config.js';
 
 // ============================================================
 // Componenti
 // ============================================================
-
-function chAvatar(chId) {
-  return state.channels[chId]?.thumb || '';
-}
 
 function vcardHTML(v, { showChannel = true } = {}) {
   const watched = isWatched(v.id);
@@ -109,16 +105,6 @@ function emptyHTML(iconName, title, text, cta = '') {
     <p>${esc(text)}</p>
     ${cta}
   </div>`;
-}
-
-function skeletonRows() {
-  const card = `<div><div class="skel skel-thumb"></div><div class="skel skel-line"></div><div class="skel skel-line w60"></div></div>`;
-  return `
-    <div class="page">
-      <div class="row-scroller" style="padding-left:0;padding-right:0">${card.repeat(5)}</div>
-      <div style="height:26px"></div>
-      <div class="row-scroller" style="padding-left:0;padding-right:0">${card.repeat(5)}</div>
-    </div>`;
 }
 
 // ============================================================
@@ -233,6 +219,10 @@ let videosFilter = { mode: 'unseen', ch: 'all' };
 
 function renderVideos() {
   const chs = channelList();
+  // il canale selezionato può essere stato rimosso (anche da un altro
+  // dispositivo): senza questo controllo restava un filtro invisibile che
+  // mostrava una pagina vuota senza spiegazione
+  if (videosFilter.ch !== 'all' && !state.channels[videosFilter.ch]) videosFilter.ch = 'all';
   let list = allVideos({ shorts: false });
   if (videosFilter.ch !== 'all') list = list.filter((v) => v.ch === videosFilter.ch);
   if (videosFilter.mode === 'unseen') list = list.filter((v) => !isWatched(v.id));
@@ -277,7 +267,7 @@ function renderVideos() {
       okLabel: 'Segna tutti',
     });
     if (!ok) return;
-    list.forEach((v) => markWatched(v.id, true));
+    markManyWatched(list.map((v) => v.id));
     toast('Tutti i video segnati come visti');
     renderVideos();
   });
@@ -534,6 +524,7 @@ function renderChannels() {
           const btn = ev.target.closest('[data-pick]');
           if (!btn) return;
           const ch = r.results.find((x) => x.id === btn.dataset.pick);
+          if (!ch) return;
           btn.disabled = true;
           await addChannelFlow(ch);
           renderChannels();
@@ -742,7 +733,9 @@ function openFilterEditor(ch, onSaved) {
   inDescEl.addEventListener('change', preview);
   noShortsEl.addEventListener('change', preview);
 
-  const close = () => { root.innerHTML = ''; };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const close = () => { root.innerHTML = ''; document.removeEventListener('keydown', onKey); };
+  document.addEventListener('keydown', onKey);
   $('#flt-overlay').addEventListener('click', (e) => { if (e.target.id === 'flt-overlay') close(); });
   $('#flt-cancel').addEventListener('click', close);
   $('#flt-save').addEventListener('click', () => {
@@ -839,7 +832,7 @@ function renderChannelDetail(chId) {
   $('#chd-markall').addEventListener('click', async () => {
     const ok = await confirmModal({ title: 'Tutto visto?', message: `Tutti i contenuti di ${ch.title} verranno segnati come visti.`, okLabel: 'Conferma' });
     if (!ok) return;
-    [...vids, ...shorts].forEach((v) => markWatched(v.id, true));
+    markManyWatched([...vids, ...shorts].map((v) => v.id));
     toast('Canale segnato come tutto visto');
     renderChannelDetail(chId);
   });
@@ -1082,10 +1075,12 @@ function renderSettings() {
   $('#btn-reset').addEventListener('click', async () => {
     const ok = await confirmModal({
       title: 'Azzerare tutto?',
-      message: 'Canali, cronologia e impostazioni su questo dispositivo verranno eliminati. Non tocca i dati già nel cloud.',
+      message: cloud.user
+        ? 'Canali, cronologia e impostazioni verranno eliminati da questo dispositivo e dal cloud, quindi anche dagli altri dispositivi collegati al tuo account.'
+        : 'Canali, cronologia e impostazioni su questo dispositivo verranno eliminati.',
       okLabel: 'Azzera', danger: true,
     });
-    if (ok) { resetAll(); toast('Dati azzerati'); location.hash = '#/home'; }
+    if (ok) { resetAll(); toast('Dati azzerati'); location.hash = '#/home'; renderRoute(); }
   });
 }
 
@@ -1128,7 +1123,9 @@ function barChart(series, key, color) {
 }
 
 function renderStats() {
-  if (!channelList().length) {
+  // niente canali E niente storico: solo qui ha senso la schermata "vuota"
+  // (prima le statistiche sparivano appena si rimuoveva l'ultimo canale)
+  if (!channelList().length && !Object.keys(state.watchTime).length) {
     view.innerHTML = `<div class="page">${emptyHTML('info', 'Ancora nessun dato', 'Aggiungi qualche canale e inizia a guardare: qui vedrai tempo di visione, canali preferiti, abitudini e molto altro.', `<a class="btn btn-accent" href="#/channels">${icon('plus', 20)} Aggiungi un canale</a>`)}</div>`;
     return;
   }
@@ -1228,7 +1225,9 @@ function renderStats() {
 
   $('.activity-feed')?.addEventListener('click', (e) => {
     const item = e.target.closest('[data-open-v]');
-    if (item && state.videos[item.dataset.openV]) openPlayer(item.dataset.openV, { onClose: renderRoute });
+    // videoInfo: apribile anche se il video non è più in cache o è stato
+    // guardato da un altro dispositivo
+    if (item && videoInfo(item.dataset.openV)) openPlayer(item.dataset.openV, { onClose: renderRoute });
   });
   $('#stats-clear').addEventListener('click', async () => {
     const ok = await confirmModal({
@@ -1256,6 +1255,7 @@ const routes = {
 };
 
 let currentRoute = 'home';
+let currentHash = '';
 
 function renderRoute() {
   const hash = location.hash.replace(/^#\/?/, '') || 'home';
@@ -1266,7 +1266,14 @@ function renderRoute() {
     a.classList.toggle('active', a.dataset.nav === name);
   });
 
-  window.scrollTo({ top: 0 });
+  // Si torna in cima solo cambiando pagina davvero: renderRoute viene chiamata
+  // anche dopo "segna come visto", un aggiornamento in background o l'arrivo di
+  // dati da un altro dispositivo, e in quei casi il salto in cima faceva
+  // perdere il punto in cui si stava scorrendo.
+  if (hash !== currentHash) {
+    currentHash = hash;
+    window.scrollTo({ top: 0 });
+  }
 
   if (name === 'channel' && param) { renderChannelDetail(param); return; }
   (routes[name] || renderHome)();
@@ -1337,25 +1344,22 @@ window.addEventListener('scroll', () => {
 // ricerca dalla topbar
 const topSearchInput = $('#topsearch-input');
 $('#topsearch').addEventListener('submit', (e) => e.preventDefault());
-topSearchInput.addEventListener('input', debounce(() => {
-  const q = topSearchInput.value;
-  lastSearchQuery = q;
-  if (currentRoute !== 'search') location.hash = '#/search';
-  else {
-    const pageInput = $('#search-input');
-    if (pageInput && pageInput.value !== q) { pageInput.value = q; }
-    doSearchFromTop(q);
-  }
-}, 350));
+topSearchInput.addEventListener('input', debounce(() => runTopSearch(topSearchInput.value, false), 350));
 topSearchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
-    lastSearchQuery = topSearchInput.value;
-    if (currentRoute !== 'search') location.hash = '#/search';
+    e.preventDefault();
+    // Invio = cerca davvero, anche su YouTube (prima, se eri già nella pagina
+    // Cerca, non faceva assolutamente nulla)
+    runTopSearch(topSearchInput.value, true);
   }
 });
-function doSearchFromTop(q) {
+
+function runTopSearch(q, includeYouTube) {
+  lastSearchQuery = q;
+  if (currentRoute !== 'search') { location.hash = '#/search'; return; }
   const pageInput = $('#search-input');
-  if (pageInput) pageInput.dispatchEvent(new Event('input'));
+  if (pageInput && pageInput.value !== q) pageInput.value = q;
+  doSearch(q, includeYouTube);
 }
 
 // aggiorna
@@ -1364,8 +1368,12 @@ refreshBtn.addEventListener('click', async () => {
   if (refreshStatus.running) return;
   if (!channelList().length) { toast('Aggiungi prima un canale', 'err'); return; }
   refreshBtn.classList.add('spin');
-  const res = await refreshAll();
-  refreshBtn.classList.remove('spin');
+  let res;
+  try {
+    res = await refreshAll();
+  } finally {
+    refreshBtn.classList.remove('spin');
+  }
   const newCount = unwatched({}).length;
   if (res.errors.length) {
     toast(`Aggiornato con ${res.errors.length} ${res.errors.length === 1 ? 'errore' : 'errori'} (${res.errors[0].channel})`, 'err');
@@ -1439,10 +1447,11 @@ async function boot() {
     // ogni ~2 min aggiorna la vista statistiche se aperta, senza disturbare le altre
     if (++hbCount % 8 === 0 && currentRoute === 'stats') renderStats();
   }, 15000);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) saveLocalNow();
-  });
-  window.addEventListener('pagehide', saveLocalNow);
+  // Alla chiusura/uscita si salva subito in locale e si forza la scrittura nel
+  // cloud: l'ultima azione era in attesa nel debounce di 2,5s e si perdeva.
+  const flushAll = () => { saveLocalNow(); flushCloud(); };
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushAll(); });
+  window.addEventListener('pagehide', flushAll);
 
   onChange((what) => {
     // ridisegna quando arrivano dati da altri dispositivi o si affinano gli shorts
@@ -1470,16 +1479,17 @@ async function boot() {
     const stale = Date.now() - (state.meta.lastRefresh || 0) > 5 * 60 * 1000;
     if (stale) {
       refreshBtn.classList.add('spin');
-      await refreshAll();
-      refreshBtn.classList.remove('spin');
+      try { await refreshAll(); } finally { refreshBtn.classList.remove('spin'); }
       renderRoute();
     }
   }
 
   setInterval(() => {
-    if (state.settings.autoRefresh && !document.hidden && channelList().length) {
-      refreshAll().then(() => renderRoute());
-    }
+    if (!state.settings.autoRefresh || document.hidden || !channelList().length) return;
+    if (refreshStatus.running) return;
+    // niente aggiornamenti mentre si sta guardando qualcosa
+    if ($('#film-overlay') || $('#shorts-overlay')) return;
+    refreshAll().then(() => renderRoute()).catch(() => {});
   }, AUTO_REFRESH_MINUTES * 60 * 1000);
 }
 

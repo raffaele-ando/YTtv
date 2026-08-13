@@ -13,14 +13,14 @@ vedere e riproduce tutto **dentro il sito**, senza mai aprire YouTube.
 - **Ricerca globale** — cerca nei tuoi canali e video, e su tutta YouTube per **nome**, **@tag** o **link**; aggiungi un canale con un click.
 - **Filtri per canale** — di un canale che pubblica più rubriche/podcast puoi tenere solo ciò che ti interessa: regole "mostra solo…" o "nascondi…" per **parole nel titolo e/o nella descrizione** e per **appartenenza alle playlist/podcast del canale** (selezionabili da un elenco), più l'opzione "niente shorts". Tutto applicato **automaticamente anche ai video futuri**, con anteprima in tempo reale, scheda "Nascosti dal filtro" e sincronizzazione nel cloud.
 - **Tracciamento completo + tab Statistiche** — registra cosa guardi, quali canali, per quanto tempo, a che ora e quando usi l'app. La pagina **Statistiche** mostra tempo di visione (grafico 14 giorni), Video vs Shorts, fasce orarie, classifica dei canali più guardati, giorni di fila (streak) e cronologia dettagliata delle attività. Tutto sincronizzato nel cloud.
-- **Login Google + sync cloud** — con Firebase (gratuito): stesso stato su telefono, tablet e computer, aggiornato in tempo reale.
+- **Login Google + sync cloud** — con Firebase (gratuito): stesso stato su telefono, tablet e computer, aggiornato in tempo reale. Anche le **cancellazioni** viaggiano: un canale rimosso, un video rimesso tra i "da vedere" o tolto da "guarda dopo" resta tale su tutti i dispositivi, senza tornare indietro alla sincronizzazione successiva.
 - **Mobile-first** — tab bar in basso, layout adattivo, installabile come app (PWA manifest).
 
 ## 🚀 Messa online (GitHub Pages)
 
-1. Vai in **Settings → Pages** del repository.
-2. In "Build and deployment" scegli **Deploy from a branch** e seleziona il branch principale (cartella `/root`).
-3. Il sito sarà su `https://<tuo-utente>.github.io/YTtv/`.
+La pubblicazione è automatica: a ogni push sul branch di sviluppo il workflow
+`.github/workflows/pages.yml` attiva GitHub Pages (se non lo è già) e pubblica il sito su
+`https://<tuo-utente>.github.io/YTtv/`. Non serve configurare nulla a mano.
 
 > Il sito è 100% statico: funziona anche su Netlify, Vercel, Cloudflare Pages o qualsiasi hosting.
 

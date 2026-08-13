@@ -11,11 +11,18 @@ export const DEFAULT_API_KEY = 'AIzaSyB00UnUb9cI2_yV_e83eIizO5WVb5QxkQM';
 
 // Proxy CORS usati per leggere i feed RSS di YouTube quando l'API
 // non è disponibile (quota esaurita, chiave non valida, offline parziale…).
-// Vengono provati in ordine.
+// Vengono provati in ordine; `parse` serve per i proxy che incartano la
+// risposta in un JSON invece di restituire l'XML grezzo.
+// Nota: corsproxy.io resta per ultimo perché sul piano gratuito risponde 403
+// a tutto ciò che non è localhost, quindi non funziona sul sito pubblicato.
 export const CORS_PROXIES = [
-  (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-  (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
-  (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+  { wrap: (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}` },
+  {
+    wrap: (u) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+    parse: (text) => JSON.parse(text)?.contents || '',
+  },
+  { wrap: (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}` },
+  { wrap: (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}` },
 ];
 
 // Numero massimo di video tenuti in cache per canale.

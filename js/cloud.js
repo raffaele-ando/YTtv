@@ -62,6 +62,7 @@ let db = null;
 let auth = null;
 let unsubSnapshot = null;
 let suppressPush = false;
+let lastRemoteStamp = 0; // updatedAt dell'ultimo documento remoto già elaborato
 
 const userListeners = new Set();
 export function onAuthChange(fn) { userListeners.add(fn); }
@@ -114,9 +115,20 @@ export async function initCloud() {
     // completa un eventuale login via redirect (mobile)
     fb.getRedirectResult(auth).catch(() => {});
   } catch (e) {
-    cloud.error = e.message;
+    handleError(e);
   }
 }
+
+// Codici per cui il popup non è utilizzabile: si passa al redirect (tipico di
+// Safari su iPhone/iPad e dei browser in-app).
+const REDIRECT_CODES = [
+  'auth/popup-blocked',
+  'auth/operation-not-supported-in-this-environment',
+  'auth/web-storage-unsupported',
+  'auth/internal-error',
+];
+// Codici che significano "l'utente ha annullato": nessun errore da mostrare.
+const CANCEL_CODES = ['auth/popup-closed-by-user', 'auth/cancelled-popup-request', 'auth/user-cancelled'];
 
 export async function signIn() {
   if (!cloud.available || !auth) throw new Error('Cloud non configurato');
@@ -124,12 +136,9 @@ export async function signIn() {
   try {
     await fb.signInWithPopup(auth, provider);
   } catch (e) {
-    // i popup spesso sono bloccati su mobile → redirect
-    if (['auth/popup-blocked', 'auth/popup-closed-by-user', 'auth/cancelled-popup-request'].includes(e.code)) {
-      if (e.code === 'auth/popup-blocked') await fb.signInWithRedirect(auth, provider);
-    } else {
-      throw e;
-    }
+    if (REDIRECT_CODES.includes(e.code)) { await fb.signInWithRedirect(auth, provider); return; }
+    if (CANCEL_CODES.includes(e.code)) return;
+    throw e;
   }
 }
 
@@ -143,6 +152,18 @@ function docRef() {
   return fb.doc(db, 'users', cloud.user.uid, 'yttv', 'data');
 }
 
+// Fonde un documento remoto e, se ha cambiato qualcosa qui, riallinea il cloud
+// (così anche le cancellazioni arrivate da un altro dispositivo restano scritte).
+function handleRemote(remote) {
+  const stamp = remote?.meta?.updatedAt || 0;
+  suppressPush = true;
+  const changed = mergeRemoteData(remote);
+  suppressPush = false;
+  lastRemoteStamp = Math.max(lastRemoteStamp, stamp);
+  if (changed) pushDebounced();
+  return changed;
+}
+
 async function startSync() {
   if (!cloud.user || !db) return;
   cloud.syncing = true;
@@ -150,23 +171,24 @@ async function startSync() {
   emit('sync');
   try {
     const snap = await fb.getDoc(docRef());
-    if (snap.exists()) {
-      suppressPush = true;
-      mergeRemoteData(snap.data());
-      suppressPush = false;
-    }
-    // il merge locale può contenere cose che il cloud non ha → push
-    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()), { merge: true });
+    if (snap.exists()) handleRemote(snap.data());
+    // Il documento locale è ora la fusione di tutto: lo riscriviamo per intero.
+    // Con { merge: true } le cancellazioni non arrivavano mai nel cloud (un
+    // canale rimosso, o un video segnato "da vedere", tornavano al sync dopo).
+    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()));
+    lastRemoteStamp = Math.max(lastRemoteStamp, state.meta.updatedAt || 0);
 
     // aggiornamenti live da altri dispositivi
     stopSnapshot();
     unsubSnapshot = fb.onSnapshot(docRef(), (s) => {
       if (!s.exists() || s.metadata.hasPendingWrites) return;
       const remote = s.data();
-      if ((remote.meta?.updatedAt || 0) <= (state.meta.updatedAt || 0)) return;
-      suppressPush = true;
-      mergeRemoteData(remote);
-      suppressPush = false;
+      const stamp = remote.meta?.updatedAt || 0;
+      // Prima si confrontava lo stamp remoto con quello locale: se questo
+      // dispositivo era stato usato più di recente (o aveva l'orologio avanti),
+      // gli aggiornamenti degli altri venivano scartati per sempre.
+      if (stamp && stamp === lastRemoteStamp) return;
+      handleRemote(remote);
     }, (err) => { handleError(err); });
 
     cloud.lastSync = Date.now();
@@ -201,12 +223,14 @@ function stopSnapshot() {
 
 function stopSync() {
   stopSnapshot();
+  lastRemoteStamp = 0;
 }
 
 async function pushNow() {
   if (!cloud.user || !db || suppressPush) return;
   try {
-    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()), { merge: true });
+    await fb.setDoc(docRef(), stripUndefined(userDataSnapshot()));
+    lastRemoteStamp = Math.max(lastRemoteStamp, state.meta.updatedAt || 0);
     cloud.lastSync = Date.now();
     cloud.error = null; cloud.errorHint = null; cloud.needsSetup = false;
   } catch (e) {
@@ -216,3 +240,10 @@ async function pushNow() {
 }
 
 const pushDebounced = debounce(pushNow, 2500);
+
+// Scrittura immediata: serve quando la pagina sta per chiudersi, altrimenti
+// l'ultima azione (in attesa nel debounce di 2,5s) non arrivava nel cloud.
+export function flushCloud() {
+  if (!cloud.user || !db) return;
+  pushNow();
+}

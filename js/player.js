@@ -9,7 +9,7 @@ import {
 } from './utils.js';
 import {
   state, isWatched, isWatchLater, markWatched, toggleWatchLater,
-  saveProgress, progressOf, unwatched, logPlay, logWatch,
+  saveProgress, progressOf, unwatched, logPlay, logWatch, videoInfo,
 } from './store.js';
 
 // Misura i secondi effettivamente guardati (solo mentre è in riproduzione).
@@ -53,6 +53,7 @@ let filmTracker = null;
 let filmMeter = null;
 let currentVideoId = null;
 let onCloseCb = null;
+let filmKeyHandler = null;
 
 function stopTracker() {
   clearInterval(filmTracker);
@@ -80,12 +81,17 @@ export function closePlayer() {
   currentVideoId = null;
   $('#player-root').innerHTML = '';
   document.body.style.overflow = '';
+  // senza questa rimozione ogni apertura del player lasciava un listener
+  // "Escape" attaccato al documento per sempre
+  if (filmKeyHandler) { document.removeEventListener('keydown', filmKeyHandler); filmKeyHandler = null; }
   onCloseCb?.();
   onCloseCb = null;
 }
 
 export async function openPlayer(videoId, { onClose } = {}) {
-  const v = state.videos[videoId];
+  // videoInfo copre anche i video non più in cache o arrivati da un altro
+  // dispositivo (cronologia e attività recente sincronizzate)
+  const v = videoInfo(videoId);
   if (!v) return;
   if (v.isShort) { openShortsPlayer([videoId], 0, { onClose }); return; }
 
@@ -172,10 +178,9 @@ export async function openPlayer(videoId, { onClose } = {}) {
     openPlayer(card.dataset.next);
   });
 
-  const escHandler = (e) => {
-    if (e.key === 'Escape') { closePlayer(); document.removeEventListener('keydown', escHandler); }
-  };
-  document.addEventListener('keydown', escHandler);
+  if (filmKeyHandler) document.removeEventListener('keydown', filmKeyHandler);
+  filmKeyHandler = (e) => { if (e.key === 'Escape') closePlayer(); };
+  document.addEventListener('keydown', filmKeyHandler);
 
   await loadYTApi();
   if (currentVideoId !== videoId || !$('#film-stage')) return;
@@ -227,7 +232,7 @@ let shortsTracker = null;
 let shortsKeyHandler = null;
 
 function shortRailHTML(id) {
-  const ch = state.channels[state.videos[id]?.ch];
+  const ch = state.channels[videoInfo(id)?.ch];
   return `
     <div class="shorts-rail">
       <button class="railbtn ${isWatched(id) ? 'on' : ''}" id="sh-watched">
@@ -247,7 +252,7 @@ function shortRailHTML(id) {
 
 function renderShortFrame(direction = '') {
   const id = shortsQueue[shortsIndex];
-  const v = state.videos[id];
+  const v = videoInfo(id);
   if (!v) { closeShortsPlayer(); return; }
   const ch = state.channels[v.ch];
 
@@ -305,9 +310,11 @@ function renderShortFrame(direction = '') {
       onReady: () => {
         // uno short si considera visto dopo 10s o al termine; nel frattempo
         // accumuliamo il tempo di visione solo mentre è effettivamente in play
+        // (prima contava anche in pausa reale, in buffering o con l'autoplay
+        // bloccato, gonfiando le statistiche di chi lasciava aperto il player)
         let seen = 0;
         shortsTracker = setInterval(() => {
-          if (stateNow === YT.PlayerState.PAUSED) return;
+          if (stateNow !== YT.PlayerState.PLAYING) return;
           seen += 1;
           logWatch(id, 1);
           if (seen >= 10 && !isWatched(id)) {
@@ -329,8 +336,11 @@ function shortsGo(delta) {
 
 export function closeShortsPlayer() {
   clearInterval(shortsTracker);
+  shortsTracker = null;
   try { shortsPlayer?.destroy(); } catch { /* ok */ }
   shortsPlayer = null;
+  shortsQueue = [];
+  shortsIndex = 0;
   $('#shorts-root').innerHTML = '';
   document.body.style.overflow = '';
   if (shortsKeyHandler) { document.removeEventListener('keydown', shortsKeyHandler); shortsKeyHandler = null; }

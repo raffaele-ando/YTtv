@@ -23,6 +23,14 @@ const emptyState = () => ({
   progress: {},   // videoId -> {t, d, at}  (riproduzione parziale)
   watchLater: {}, // videoId -> at
   watchTime: {},  // videoId -> {sec, plays, first, last, ch, title, short}  (tempo di visione cumulativo)
+  // "lapidi": cosa è stato cancellato e quando. Senza queste, una rimozione
+  // fatta su un dispositivo tornerebbe indietro dal cloud (o dall'altro
+  // dispositivo che ha ancora il dato) alla prima sincronizzazione.
+  graves: {
+    ch: {},       // channelId -> ts di rimozione
+    wa: {},       // videoId -> ts in cui è stato segnato "da vedere"
+    wl: {},       // videoId -> ts di rimozione da "guarda dopo"
+  },
   activity: {
     daily: {},    // 'YYYY-MM-DD' -> {sec, plays, shorts, opens, appSec}
     events: [],   // cronologia dettagliata: {t, type, id?, ch?, title?, short?, q?, sec?}
@@ -53,8 +61,23 @@ export function loadLocal() {
   // normalizza le strutture di tracciamento per gli stati salvati da versioni precedenti
   state.watchTime = state.watchTime || {};
   state.activity = { daily: {}, events: [], sessions: [], ...(state.activity || {}) };
+  state.graves = { ch: {}, wa: {}, wl: {}, ...(state.graves || {}) };
   setApiKey(state.settings.apiKey);
 }
+
+const MAX_GRAVES = 300;
+
+// Registra una cancellazione (e tiene la lista limitata alle più recenti).
+function grave(kind, id) {
+  const g = state.graves[kind];
+  if (!g) return;
+  g[id] = Date.now();
+  const keys = Object.keys(g);
+  if (keys.length > MAX_GRAVES) {
+    keys.sort((a, b) => g[b] - g[a]).slice(MAX_GRAVES).forEach((k) => delete g[k]);
+  }
+}
+const ungrave = (kind, id) => { delete state.graves[kind]?.[id]; };
 
 let saveTimer = null;
 export function saveLocal() {
@@ -92,6 +115,7 @@ export function userDataSnapshot() {
     progress: state.progress,
     watchLater: state.watchLater,
     watchTime: state.watchTime,
+    graves: state.graves,
     activity: {
       daily: state.activity.daily,
       events: state.activity.events.slice(0, 250),
@@ -102,12 +126,48 @@ export function userDataSnapshot() {
   };
 }
 
+// Applica le lapidi ai dati locali: ciò che è stato cancellato (qui o su un
+// altro dispositivo) sparisce, a meno che non sia stato ri-aggiunto dopo.
+function applyGraves() {
+  let changed = false;
+  for (const [id, ts] of Object.entries(state.graves.ch)) {
+    const ch = state.channels[id];
+    if (ch && (ch.addedAt || 0) <= ts) {
+      delete state.channels[id];
+      for (const [vid, v] of Object.entries(state.videos)) if (v.ch === id) delete state.videos[vid];
+      changed = true;
+    }
+  }
+  for (const [id, ts] of Object.entries(state.graves.wa)) {
+    const w = state.watched[id];
+    if (w && (w.at || 0) <= ts) { delete state.watched[id]; changed = true; }
+  }
+  for (const [id, ts] of Object.entries(state.graves.wl)) {
+    const at = state.watchLater[id];
+    if (at != null && at <= ts) { delete state.watchLater[id]; changed = true; }
+  }
+  return changed;
+}
+
 // Fusione dei dati remoti con quelli locali (unione, vince il più recente)
 export function mergeRemoteData(remote) {
   if (!remote) return false;
   let changed = false;
 
+  // 1) unione delle lapidi (vince il timestamp più recente)
+  for (const kind of ['ch', 'wa', 'wl']) {
+    for (const [id, ts] of Object.entries(remote.graves?.[kind] || {})) {
+      if ((state.graves[kind][id] || 0) < ts) { state.graves[kind][id] = ts; changed = true; }
+    }
+  }
+  // 2) le cancellazioni fatte altrove valgono anche qui
+  if (applyGraves()) changed = true;
+
+  // 3) fusione dei dati, ignorando ciò che risulta cancellato
+  const buried = (kind, id, ts) => (state.graves[kind][id] || 0) >= (ts || 0);
+
   for (const [id, ch] of Object.entries(remote.channels || {})) {
+    if (buried('ch', id, ch.addedAt)) continue;
     const local = state.channels[id];
     if (!local) {
       state.channels[id] = { ...ch };
@@ -121,6 +181,7 @@ export function mergeRemoteData(remote) {
     }
   }
   for (const [id, w] of Object.entries(remote.watched || {})) {
+    if (buried('wa', id, w.at)) continue;
     const local = state.watched[id];
     if (!local || (w.at || 0) > (local.at || 0)) { state.watched[id] = w; changed = true; }
   }
@@ -129,6 +190,7 @@ export function mergeRemoteData(remote) {
     if (!local || (p.at || 0) > (local.at || 0)) { state.progress[id] = p; changed = true; }
   }
   for (const [id, at] of Object.entries(remote.watchLater || {})) {
+    if (buried('wl', id, at)) continue;
     if (!state.watchLater[id]) { state.watchLater[id] = at; changed = true; }
   }
   // tempo di visione: unione conservativa (max), non somma → mai gonfiato tra dispositivi
@@ -145,7 +207,12 @@ export function mergeRemoteData(remote) {
         title: l.title || r.title || '',
         short: l.short ?? r.short ?? false,
       };
-      if (JSON.stringify(merged) !== JSON.stringify(l)) { state.watchTime[id] = merged; changed = true; }
+      // confronto campo per campo: con JSON.stringify bastava un ordine di
+      // chiavi diverso per far credere che ci fosse una modifica, e i due
+      // dispositivi si rimpallavano scritture all'infinito
+      const differs = ['sec', 'plays', 'first', 'last', 'ch', 'title', 'short']
+        .some((k) => merged[k] !== l[k]);
+      if (differs) { state.watchTime[id] = merged; changed = true; }
     }
   }
   // aggregati giornalieri: max per campo per giorno (evita doppi conteggi al riallineamento)
@@ -203,7 +270,8 @@ export function mergeRemoteData(remote) {
 // ---------- canali ----------
 
 export function addChannel(channel) {
-  if (state.channels[channel.id]) return false;
+  if (!channel?.id || state.channels[channel.id]) return false;
+  ungrave('ch', channel.id);
   state.channels[channel.id] = { ...channel, addedAt: Date.now() };
   touch();
   emit();
@@ -215,6 +283,7 @@ export function removeChannel(id) {
   for (const [vid, v] of Object.entries(state.videos)) {
     if (v.ch === id) delete state.videos[vid];
   }
+  grave('ch', id);
   touch();
   emit();
 }
@@ -318,6 +387,20 @@ export function allVideos({ shorts = null, includeExcluded = false } = {}) {
   return list.sort((a, b) => new Date(b.pub) - new Date(a.pub));
 }
 
+// Informazioni su un video anche se non è più in cache (o non lo è ancora su
+// questo dispositivo): si ricostruiscono dal tracciamento, che viaggia nel cloud.
+export function videoInfo(id) {
+  const v = state.videos[id];
+  if (v) return v;
+  const wt = state.watchTime[id];
+  if (!wt) return null;
+  return {
+    id, ch: wt.ch || null, title: wt.title || 'Video', desc: '',
+    pub: wt.first || 0, dur: 0, views: null, isShort: Boolean(wt.short),
+    live: false, src: 'track', fromTracking: true,
+  };
+}
+
 export const isWatched = (id) => Boolean(state.watched[id]);
 export const isWatchLater = (id) => Boolean(state.watchLater[id]);
 export const progressOf = (id) => state.progress[id] || null;
@@ -344,27 +427,40 @@ export function historyList(limit = 60) {
   return Object.entries(state.watched)
     .sort((a, b) => (b[1].at || 0) - (a[1].at || 0))
     .slice(0, limit)
-    .map(([id, w]) => ({ video: state.videos[id], id, at: w.at }))
+    .map(([id, w]) => ({ video: videoInfo(id), id, at: w.at }))
     .filter((h) => h.video);
 }
 
 // ---------- azioni utente ----------
 
-export function markWatched(id, watched = true) {
+function setWatched(id, watched) {
   if (watched) {
+    ungrave('wa', id);
     state.watched[id] = { at: Date.now() };
     delete state.progress[id];
-    delete state.watchLater[id];
+    if (state.watchLater[id] != null) { delete state.watchLater[id]; grave('wl', id); }
   } else {
     delete state.watched[id];
+    grave('wa', id);
   }
+}
+
+export function markWatched(id, watched = true) {
+  setWatched(id, watched);
+  touch();
+  emit();
+}
+
+// Segna in blocco (un solo salvataggio/sync invece di uno per video).
+export function markManyWatched(ids, watched = true) {
+  for (const id of ids) setWatched(id, watched);
   touch();
   emit();
 }
 
 export function toggleWatchLater(id) {
-  if (state.watchLater[id]) delete state.watchLater[id];
-  else state.watchLater[id] = Date.now();
+  if (state.watchLater[id]) { delete state.watchLater[id]; grave('wl', id); }
+  else { ungrave('wl', id); state.watchLater[id] = Date.now(); }
   touch();
   emit();
   return Boolean(state.watchLater[id]);
@@ -372,6 +468,9 @@ export function toggleWatchLater(id) {
 
 export function saveProgress(id, t, d) {
   if (!t || t < 5) return;
+  // già visto: niente da salvare (evitava un markWatched ripetuto ogni 5s
+  // negli ultimi minuti del video, con un push nel cloud ogni volta)
+  if (state.watched[id]) return;
   state.progress[id] = { t: Math.floor(t), d: Math.floor(d || 0), at: Date.now() };
   // visto al 90%
   if (d && t / d >= 0.9) markWatched(id, true);
@@ -509,7 +608,7 @@ export function analytics(days = 14) {
 
   // streak di giorni consecutivi con attività
   let streak = 0;
-  for (let i = 0; ; i++) {
+  for (let i = 0; i < 3650; i++) {
     const k = dateKey(Date.now() - i * 86400000);
     const d = state.activity.daily[k];
     if (d && ((d.plays || 0) > 0 || (d.appSec || 0) > 30)) streak++;
@@ -538,6 +637,9 @@ export function clearActivity() {
   state.watchTime = {};
   state.activity = { daily: {}, events: [], sessions: [] };
   currentSession = null;
+  // riapre subito una sessione, altrimenti il tempo nell'app non verrebbe più
+  // conteggiato fino al ricaricamento della pagina
+  startSession();
   touch();
   emit();
 }
@@ -559,9 +661,17 @@ export async function refreshChannel(channel) {
     state.videos[v.id] = prev ? { ...prev, ...v, probed: prev.probed, isShort: prev.probed ? prev.isShort : v.isShort } : v;
   }
 
-  // pota la cache del canale (compresi gli esclusi dai filtri, o non verrebbero mai eliminati)
+  // Pota la cache del canale (compresi gli esclusi dai filtri, o non verrebbero
+  // mai eliminati). I contenuti a cui l'utente è "attaccato" (guarda dopo, in
+  // corso, già visti) restano più a lungo: cancellarli subito svuotava la
+  // cronologia e falsava i conteggi visti/shorts.
   const list = videosOf(channel.id, { includeExcluded: true });
+  const keep = (v) => state.watchLater[v.id] || state.progress[v.id] || state.watched[v.id];
   for (const old of list.slice(MAX_CACHE_PER_CHANNEL)) {
+    if (!keep(old)) delete state.videos[old.id];
+  }
+  // limite comunque invalicabile, per non far crescere lo storage all'infinito
+  for (const old of list.slice(MAX_CACHE_PER_CHANNEL * 3)) {
     if (!state.watchLater[old.id] && !state.progress[old.id]) delete state.videos[old.id];
   }
 
@@ -631,7 +741,9 @@ export function stats() {
   const watchedEntries = Object.keys(state.watched);
   let watchedVideos = 0, watchedShorts = 0;
   for (const id of watchedEntries) {
-    const v = state.videos[id];
+    // videoInfo copre anche i video usciti dalla cache: senza, finivano tutti
+    // conteggiati come "video" anche quando erano shorts
+    const v = videoInfo(id);
     if (v?.isShort) watchedShorts++; else watchedVideos++;
   }
   // ore reali di visione dal tempo tracciato (fallback sulla durata dei visti)
@@ -667,5 +779,10 @@ export function importJSON(text) {
 export function resetAll() {
   Object.assign(state, emptyState());
   localStorage.removeItem(LS_KEY);
+  currentSession = null;
+  startSession();
+  // Senza questo, con l'accesso Google attivo il documento remoto (più recente)
+  // rimetteva subito tutto al suo posto e l'azzeramento sembrava non funzionare.
+  touch();
   emit();
 }
